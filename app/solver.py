@@ -5,8 +5,9 @@ import requests
 import subprocess
 import re
 import tempfile
+import pandas as pd
 from typing import Dict, Any, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, unquote
 
 # Third-party
 from playwright.sync_api import sync_playwright
@@ -33,16 +34,15 @@ class QuizAgent:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             try:
-                # 20s timeout to fail fast if site is down
-                page.goto(url, wait_until="networkidle", timeout=20000)
-                
-                # Get HTML and convert to Markdown (Preserves Table Structure)
+                page.goto(url, wait_until="networkidle", timeout=15000)
                 content_html = page.content()
-                content_md = md(content_html, strip=['a', 'img']) 
+                # Strip images/links to save tokens, keep tables
+                content_md = md(content_html, strip=['img', 'a']) 
                 return content_md
             except Exception as e:
                 logger.error(f"Scraping failed: {e}")
-                raise
+                # Fallback: return raw text if MD fails
+                return "Error scraping page content."
             finally:
                 browser.close()
 
@@ -74,9 +74,17 @@ class QuizAgent:
         if not file_url:
             return None
         
-        # Handle relative URLs (e.g., "data.csv" -> "https://site.com/data.csv")
+        # Normalize URL
         full_url = urljoin(base_url, file_url)
-        filename = full_url.split("/")[-1]
+        
+        # Clean Filename (Handle ?query=params)
+        parsed_url = urlparse(full_url)
+        filename = os.path.basename(parsed_url.path)
+        if not filename or "." not in filename:
+            filename = "data_file.dat" # Fallback
+        
+        # Decode URL encoded chars
+        filename = unquote(filename)
         local_path = os.path.join(self.work_dir, filename)
         
         logger.info(f"Downloading {full_url} -> {local_path}")
@@ -90,27 +98,66 @@ class QuizAgent:
             logger.error(f"Download failed: {e}")
             return None
 
+    def inspect_file_content(self, file_path: str) -> str:
+        """
+        [CRITICAL FIX] 
+        Peeks into the file to give the LLM the ACTUAL column names/structure 
+        before it writes code. Prevents 'Column not found' errors.
+        """
+        if not file_path or not os.path.exists(file_path):
+            return "No file available."
+        
+        try:
+            # Try CSV
+            if file_path.endswith('.csv') or 'csv' in file_path:
+                df = pd.read_csv(file_path, nrows=3)
+                return f"CSV Columns: {list(df.columns)}\nFirst Row: {df.iloc[0].to_dict()}"
+            
+            # Try JSON
+            if file_path.endswith('.json') or 'json' in file_path:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        return f"JSON List. First Item Keys: {list(data[0].keys()) if data else 'Empty'}"
+                    return f"JSON Keys: {list(data.keys())}"
+            
+            # Try Excel
+            if file_path.endswith('.xlsx'):
+                df = pd.read_excel(file_path, nrows=3)
+                return f"Excel Columns: {list(df.columns)}"
+
+            # Text/Unknown
+            with open(file_path, 'r', errors='ignore') as f:
+                return f"File Start: {f.read(500)}"
+                
+        except Exception as e:
+            return f"Error inspecting file: {str(e)}"
+
     def execute_python_solution(self, question: str, data_path: str) -> Any:
-        """Generates and runs code in a loop to handle errors."""
         max_retries = 3
         last_error = None
         
+        # [NEW] Get file metadata to prevent guessing
+        file_metadata = self.inspect_file_content(data_path)
+        logger.info(f"File Metadata extracted: {file_metadata}")
+
         for attempt in range(max_retries):
             logger.info(f"Code Gen Attempt {attempt+1}")
             
             prompt = (
-                f"Question: {question}\n"
-                f"Data File Path: '{data_path}' (Verify file exists before reading)\n"
-                f"Working Directory: {self.work_dir}\n"
-                "Write a Python script to solve this. \n"
+                f"Goal: {question}\n"
+                f"Data File: '{data_path}'\n"
+                f"File Structure Preview: {file_metadata}\n"
+                "Write a Python script to calculate the answer.\n"
                 "CRITICAL RULES:\n"
-                "1. PRINT ONLY the final answer to stdout using print(). Do NOT print debug info.\n"
-                "2. Handle CSV/Excel/PDF parsing using pandas/openpyxl/pypdf.\n"
-                "3. If the answer is a string, strip whitespace.\n"
+                "1. Use 'pypdf' for PDFs (NOT PyPDF2).\n"
+                "2. Use 'pandas' for CSV/Excel.\n"
+                "3. PRINT only the final answer to stdout.\n"
+                "4. If column names in the Preview match roughly, use the exact names from Preview.\n"
             )
             
             if last_error:
-                prompt += f"\nPREVIOUS ERROR: {last_error}\nFIX THE CODE. Did you forget to print the answer?"
+                prompt += f"\nPREVIOUS ERROR: {last_error}\nFix it."
 
             completion = self.client.chat.completions.create(
                 model="gpt-4o",
@@ -136,12 +183,9 @@ class QuizAgent:
                 
                 if result.returncode == 0:
                     ans = result.stdout.strip()
-                    # [FIX FOR EMPTY ANSWER ERROR]
                     if not ans:
-                        last_error = "Script executed successfully but printed NOTHING. You MUST print(result)."
-                        logger.warning(f"Attempt {attempt+1} failed: Empty Output")
-                        continue 
-                    
+                        last_error = "Script ran but printed nothing. You MUST print(result)."
+                        continue
                     logger.info(f"Answer found: {ans}")
                     return ans
                 else:
@@ -150,41 +194,30 @@ class QuizAgent:
             except Exception as e:
                 last_error = str(e)
                 
-        raise Exception("Failed to solve question after retries")
+        raise Exception("Failed to solve after retries.")
 
     def solve_recursive(self, start_url: str, email: str, secret: str):
-        """The main loop handling the chain of quizzes."""
         current_url = start_url
         visited = set()
         history = []
 
         while current_url:
             if current_url in visited:
-                logger.error("Infinite loop detected in quiz URLs")
                 break
-            
             visited.add(current_url)
-            logger.info(f"--- Processing Level: {current_url} ---")
             
             try:
-                # 1. Scrape
                 page_md = self.scrape_page(current_url)
-                
-                # 2. Parse Instructions
                 task = self.parse_task(page_md)
                 
-                # [FIX FOR INVALID URL ERROR] Normalize the Submit URL
-                submit_url = task.get("submit_url")
-                if submit_url:
-                    submit_url = urljoin(current_url, submit_url)
+                # Normalize Submit URL
+                if task.get("submit_url"):
+                    task["submit_url"] = urljoin(current_url, task["submit_url"])
                 
-                # 3. Get Data
                 data_path = self.download_file(task.get("data_url"), current_url)
-                
-                # 4. Solve
                 answer = self.execute_python_solution(task["question"], data_path)
                 
-                # Numeric conversion heuristic
+                # Numeric sanitation
                 try:
                     clean_ans = str(answer).replace(',', '')
                     if '.' in clean_ans:
@@ -194,7 +227,6 @@ class QuizAgent:
                 except:
                     json_answer = answer 
 
-                # 5. Submit
                 payload = {
                     "email": email,
                     "secret": secret,
@@ -202,27 +234,23 @@ class QuizAgent:
                     task.get("answer_key", "answer"): json_answer
                 }
                 
-                logger.info(f"Submitting payload to {submit_url}")
-                resp = requests.post(submit_url, json=payload, verify=False, timeout=10)
+                logger.info(f"Submitting to {task['submit_url']}")
+                resp = requests.post(task['submit_url'], json=payload, verify=False, timeout=10)
                 resp_data = resp.json()
                 
-                history.append({"url": current_url, "status": resp_data})
+                history.append(resp_data)
                 
-                # 6. Check Logic for Next Step
                 if resp_data.get("correct", False):
                     next_url = resp_data.get("url")
                     if next_url:
-                        logger.info(f"Correct! Advancing to {next_url}")
                         current_url = next_url
                     else:
-                        logger.info("Quiz Completed Successfully!")
                         return {"status": "completed", "history": history}
                 else:
-                    logger.error(f"Wrong Answer: {resp_data}")
                     return {"status": "failed", "reason": resp_data, "history": history}
 
             except Exception as e:
-                logger.error(f"Error in loop: {e}", exc_info=True)
+                logger.error(f"Loop error: {e}", exc_info=True)
                 return {"status": "error", "message": str(e)}
         
         return {"status": "completed", "history": history}
