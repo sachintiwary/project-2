@@ -23,7 +23,7 @@ class QuizAgent:
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
         # Using 1.5 Pro (The smartest available public model)
-        self.model_name = "gemini-1.5-pro" 
+        self.model_name = "gemini-2.5-pro" 
         self.model = genai.GenerativeModel(self.model_name)
         self.work_dir = tempfile.mkdtemp(prefix="quiz_task_")
         logger.info(f"Workspace: {self.work_dir} | Model: {self.model_name}")
