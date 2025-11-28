@@ -3,7 +3,6 @@ import logging
 import json
 import requests
 import subprocess
-import re
 import tempfile
 import time
 import pandas as pd
@@ -24,37 +23,32 @@ class QuizAgent:
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
         
-        # [USER REQUEST]: Using the Smartest Available Pro Model
-        # In Nov 2025 context, if 'gemini-3.0-pro' exists, change string below.
-        # Currently, 'gemini-1.5-pro' is the SOTA public endpoint.
+        # Using 1.5 Pro for maximum reasoning capability
         self.model_name = "gemini-2.5-pro" 
         self.model = genai.GenerativeModel(self.model_name)
         
         self.work_dir = tempfile.mkdtemp(prefix="quiz_task_")
         logger.info(f"Workspace: {self.work_dir} | Model: {self.model_name}")
 
-    def generate_with_backoff(self, prompt: str, is_json: bool = False) -> str:
+    def generate_with_backoff(self, prompt: str, is_json: bool = True) -> str:
         """
-        Handles the strict 2 RPM limit of Pro models on Free Tier.
-        If we hit 429, we sleep and retry.
+        Forces JSON mode to ensure structured output.
         """
         config = {"response_mime_type": "application/json"} if is_json else None
-        
         retries = 3
         for attempt in range(retries):
             try:
                 response = self.model.generate_content(prompt, generation_config=config)
                 return response.text
             except exceptions.ResourceExhausted:
-                wait_time = 32  # Free tier resets every 60s, usually 30s wait is enough
-                logger.warning(f"Rate Limit Hit ({self.model_name}). Sleeping {wait_time}s...")
+                wait_time = 20
+                logger.warning(f"Rate Limit ({self.model_name}). Sleeping {wait_time}s...")
                 time.sleep(wait_time)
-                continue # Retry
+                continue
             except Exception as e:
                 logger.error(f"GenAI Error: {e}")
                 raise
-        
-        raise Exception("Failed to generate content after rate limit retries.")
+        raise Exception("Failed to generate content after retries.")
 
     def scrape_page(self, url: str) -> str:
         logger.info(f"Scraping: {url}")
@@ -73,17 +67,24 @@ class QuizAgent:
                 browser.close()
 
     def parse_task(self, page_content: str) -> Dict[str, Any]:
-        prompt = (
-            "Extract into JSON:\n"
-            "1. question: The specific question.\n"
-            "2. data_url: File URL (null if none).\n"
-            "3. submit_url: POST URL.\n"
-            "4. answer_key: JSON key for answer.\n\n"
-            f"Page Content:\n{page_content}"
-        )
-        
+        """
+        Input: Raw Text
+        Output: JSON Structure
+        """
+        prompt = f"""
+        You are a data extraction agent. 
+        Analyze the following text and return a JSON object with these exact keys:
+        {{
+            "question": "The specific analysis question to answer",
+            "data_url": "The full URL of the data file mentioned (or null if none)",
+            "submit_url": "The full URL to POST the answer to",
+            "answer_key": "The JSON key required for the answer (usually 'answer')"
+        }}
+
+        PAGE CONTENT:
+        {page_content}
+        """
         try:
-            # Use backoff wrapper
             text_resp = self.generate_with_backoff(prompt, is_json=True)
             return json.loads(text_resp)
         except Exception as e:
@@ -92,6 +93,7 @@ class QuizAgent:
 
     def get_filename_from_cd(self, cd: str) -> Optional[str]:
         if not cd: return None
+        import re
         fname = re.findall('filename=(.+)', cd)
         if len(fname) == 0: return None
         return fname[0].strip().strip('"').strip("'")
@@ -150,41 +152,84 @@ class QuizAgent:
         last_error = None
         file_metadata = self.inspect_file_content(data_path)
         
+        # 1. Construct the Input Context Object
+        # This is the "JSON Prompt" strategy
+        context_payload = {
+            "task": "Write a Python script to solve the user's question.",
+            "user_question": question,
+            "environment": {
+                "file_path": data_path if data_path else None,
+                "file_metadata": file_metadata,
+                "working_directory": self.work_dir
+            },
+            "constraints": [
+                "Do NOT use Selenium, Webdriver, or Browsers.",
+                "Use 'requests' for HTTP calls if needed.",
+                "Use 'pandas', 'json', 'BeautifulSoup', 'pypdf' as needed.",
+                "The script must PRINT only the final answer to stdout."
+            ]
+        }
+
         for attempt in range(max_retries):
             logger.info(f"Gen Attempt {attempt+1}")
-            prompt = (
-                f"Goal: {question}\nMetadata: {file_metadata}\nWD: {self.work_dir}\n"
-                "Write Python script.\nRULES:\n"
-                "1. 'file_path' variable is PRE-DEFINED. Use it.\n"
-                "2. If HTML->BeautifulSoup. If CSV->pandas.\n"
-                "3. PRINT ONLY final answer to stdout.\n"
-            )
-            if last_error: prompt += f"\nFix error: {last_error}"
-
-            # Use backoff wrapper
-            raw_code = self.generate_with_backoff(prompt)
             
-            code_match = re.search(r"```python(.*?)```", raw_code, re.DOTALL)
-            code = code_match.group(1).strip() if code_match else raw_code
-            
-            injected_code = f"import base64\nfile_path = {repr(data_path)}\n" + code
+            if last_error:
+                context_payload["previous_error"] = last_error
 
-            script_path = os.path.join(self.work_dir, "solve.py")
-            with open(script_path, "w") as f: f.write(injected_code)
+            # 2. Send the Prompt
+            prompt = f"""
+            Act as a Senior Python Developer.
+            
+            INPUT CONTEXT:
+            {json.dumps(context_payload, indent=2)}
+
+            RESPONSE FORMAT (Must be valid JSON):
+            {{
+                "thought_process": "Analyze the file path status and metadata. Explain your plan.",
+                "python_code": "The executable python code string. Must handle imports."
+            }}
+            """
+
+            # 3. Get JSON Response
+            response_text = self.generate_with_backoff(prompt, is_json=True)
             
             try:
+                llm_response = json.loads(response_text)
+                
+                # Extract logic
+                reasoning = llm_response.get("thought_process", "No reasoning provided.")
+                code = llm_response.get("python_code", "")
+                
+                logger.info(f"LLM Thoughts: {reasoning}")
+                
+                if not code:
+                    raise ValueError("LLM returned empty code.")
+
+                # Inject Path Variable safety
+                path_val = repr(data_path) if data_path else "None"
+                injected_code = f"import base64\nfile_path = {path_val}\n" + code
+
+                script_path = os.path.join(self.work_dir, "solve.py")
+                with open(script_path, "w") as f: f.write(injected_code)
+                
+                # Execute
                 result = subprocess.run(["python", script_path], capture_output=True, text=True, cwd=self.work_dir, timeout=30)
+                
                 if result.returncode == 0:
                     ans = result.stdout.strip()
                     if not ans: 
-                        last_error = "Printed nothing."
+                        last_error = "Script executed successfully but printed NOTHING."
                         continue
-                    logger.info(f"Answer: {ans[:50]}...")
+                    logger.info(f"Answer: {ans[:100]}...")
                     return ans
                 else:
                     last_error = result.stderr
                     logger.warning(f"Script Error: {last_error}")
-            except Exception as e: last_error = str(e)
+
+            except json.JSONDecodeError:
+                last_error = "LLM failed to return valid JSON."
+            except Exception as e:
+                last_error = str(e)
                 
         raise Exception("Solution failed after retries.")
 
