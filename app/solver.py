@@ -5,7 +5,6 @@ import requests
 import subprocess
 import re
 import tempfile
-import glob
 from typing import Dict, Any, Optional
 from urllib.parse import urljoin
 
@@ -22,7 +21,7 @@ class QuizAgent:
     def __init__(self, api_key: str):
         self.client = OpenAI(
             api_key=api_key, 
-            base_url="https://aipipe.org/openai/v1" # Or standard OpenAI
+            base_url="https://aipipe.org/openai/v1"
         )
         self.work_dir = tempfile.mkdtemp(prefix="quiz_task_")
         logger.info(f"Workspace created: {self.work_dir}")
@@ -34,7 +33,7 @@ class QuizAgent:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             try:
-                # [EDGE CASE] Set timeout to fail fast if site is down
+                # 20s timeout to fail fast if site is down
                 page.goto(url, wait_until="networkidle", timeout=20000)
                 
                 # Get HTML and convert to Markdown (Preserves Table Structure)
@@ -75,7 +74,7 @@ class QuizAgent:
         if not file_url:
             return None
         
-        # Handle relative URLs
+        # Handle relative URLs (e.g., "data.csv" -> "https://site.com/data.csv")
         full_url = urljoin(base_url, file_url)
         filename = full_url.split("/")[-1]
         local_path = os.path.join(self.work_dir, filename)
@@ -89,9 +88,10 @@ class QuizAgent:
             return local_path
         except Exception as e:
             logger.error(f"Download failed: {e}")
-            return None # Try to solve without file if download fails (Edge Case)
+            return None
 
     def execute_python_solution(self, question: str, data_path: str) -> Any:
+        """Generates and runs code in a loop to handle errors."""
         max_retries = 3
         last_error = None
         
@@ -100,17 +100,17 @@ class QuizAgent:
             
             prompt = (
                 f"Question: {question}\n"
-                f"Data File Path: '{data_path}'\n"
-                "Write a Python script to solve this.\n"
+                f"Data File Path: '{data_path}' (Verify file exists before reading)\n"
+                f"Working Directory: {self.work_dir}\n"
+                "Write a Python script to solve this. \n"
                 "CRITICAL RULES:\n"
-                "1. You MUST print the final answer to stdout using print().\n"
-                "2. Do NOT print debug messages, only the answer.\n"
-                "3. If using a function, remember to call it and print the result.\n"
-                "4. Handle data loading errors gracefully.\n"
+                "1. PRINT ONLY the final answer to stdout using print(). Do NOT print debug info.\n"
+                "2. Handle CSV/Excel/PDF parsing using pandas/openpyxl/pypdf.\n"
+                "3. If the answer is a string, strip whitespace.\n"
             )
             
             if last_error:
-                prompt += f"\n\nPREVIOUS ERROR: {last_error}\nFix the code to ensure it prints the answer."
+                prompt += f"\nPREVIOUS ERROR: {last_error}\nFIX THE CODE. Did you forget to print the answer?"
 
             completion = self.client.chat.completions.create(
                 model="gpt-4o",
@@ -136,11 +136,11 @@ class QuizAgent:
                 
                 if result.returncode == 0:
                     ans = result.stdout.strip()
-                    # [CRITICAL FIX] Check if output is empty
+                    # [FIX FOR EMPTY ANSWER ERROR]
                     if not ans:
-                        last_error = "Script executed successfully but printed NOTHING. Did you forget to print(result)?"
+                        last_error = "Script executed successfully but printed NOTHING. You MUST print(result)."
                         logger.warning(f"Attempt {attempt+1} failed: Empty Output")
-                        continue # This triggers the retry loop
+                        continue 
                     
                     logger.info(f"Answer found: {ans}")
                     return ans
@@ -150,7 +150,7 @@ class QuizAgent:
             except Exception as e:
                 last_error = str(e)
                 
-        raise Exception("Failed to solve question: Code generated no output or crashed.")
+        raise Exception("Failed to solve question after retries")
 
     def solve_recursive(self, start_url: str, email: str, secret: str):
         """The main loop handling the chain of quizzes."""
@@ -173,22 +173,26 @@ class QuizAgent:
                 # 2. Parse Instructions
                 task = self.parse_task(page_md)
                 
+                # [FIX FOR INVALID URL ERROR] Normalize the Submit URL
+                submit_url = task.get("submit_url")
+                if submit_url:
+                    submit_url = urljoin(current_url, submit_url)
+                
                 # 3. Get Data
                 data_path = self.download_file(task.get("data_url"), current_url)
                 
                 # 4. Solve
                 answer = self.execute_python_solution(task["question"], data_path)
                 
-                # [EDGE CASE] Numeric conversion
+                # Numeric conversion heuristic
                 try:
-                    # Clean potential string artifacts
                     clean_ans = str(answer).replace(',', '')
                     if '.' in clean_ans:
                         json_answer = float(clean_ans)
                     else:
                         json_answer = int(clean_ans)
                 except:
-                    json_answer = answer # Keep as string if not number
+                    json_answer = answer 
 
                 # 5. Submit
                 payload = {
@@ -198,8 +202,8 @@ class QuizAgent:
                     task.get("answer_key", "answer"): json_answer
                 }
                 
-                logger.info(f"Submitting payload to {task['submit_url']}")
-                resp = requests.post(task['submit_url'], json=payload, verify=False, timeout=10)
+                logger.info(f"Submitting payload to {submit_url}")
+                resp = requests.post(submit_url, json=payload, verify=False, timeout=10)
                 resp_data = resp.json()
                 
                 history.append({"url": current_url, "status": resp_data})
@@ -214,9 +218,6 @@ class QuizAgent:
                         logger.info("Quiz Completed Successfully!")
                         return {"status": "completed", "history": history}
                 else:
-                    # [EDGE CASE] If wrong, we could retry here, but usually, 
-                    # we just report error and let the caller decide.
-                    # For this specific project, one fail usually means game over or manual retry needed.
                     logger.error(f"Wrong Answer: {resp_data}")
                     return {"status": "failed", "reason": resp_data, "history": history}
 
