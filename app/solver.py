@@ -22,7 +22,8 @@ logger.setLevel(logging.INFO)
 class QuizAgent:
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
-        self.model_name = "gemini-2.5-pro" 
+        # Using 1.5 Pro (The smartest available public model)
+        self.model_name = "gemini-1.5-pro" 
         self.model = genai.GenerativeModel(self.model_name)
         self.work_dir = tempfile.mkdtemp(prefix="quiz_task_")
         logger.info(f"Workspace: {self.work_dir} | Model: {self.model_name}")
@@ -61,23 +62,19 @@ class QuizAgent:
                 browser.close()
 
     def parse_task(self, page_content: str, current_url: str) -> Dict[str, Any]:
-        """
-        [SENIOR DEV FIX] We pass 'current_url' so the LLM knows the domain.
-        """
         parsed = urlparse(current_url)
         base_domain = f"{parsed.scheme}://{parsed.netloc}"
         
         prompt = f"""
         You are a data extraction agent. 
-        
         CONTEXT:
-        - The current page URL is: {current_url}
-        - The Base Domain is: {base_domain}
+        - Current Page: {current_url}
+        - Base Domain: {base_domain}
         
         INSTRUCTIONS:
         1. Extract the question and URLs.
-        2. **CRITICAL**: If a URL is relative (e.g., "/submit" or has a placeholder like <span class="origin">), YOU MUST PREPEND the Base Domain ({base_domain}).
-        3. Do NOT assume localhost. Use the provided Base Domain.
+        2. If a URL is relative (e.g. starts with / or has <span class="origin">), PREPEND the Base Domain.
+        3. Do NOT assume localhost.
 
         PAGE CONTENT:
         {page_content}
@@ -158,7 +155,6 @@ class QuizAgent:
         last_error = None
         file_metadata = self.inspect_file_content(data_path)
         
-        # [SENIOR DEV FIX] We define the "requests" environment for the LLM
         context_payload = {
             "task": "Write Python script to solve question.",
             "question": question,
@@ -168,9 +164,9 @@ class QuizAgent:
             },
             "constraints": [
                 "NO Selenium/Webdriver.",
-                "Use 'requests' for API calls.",
-                "If file_path is None, the data might be at a URL described in the question.",
-                "PRINT ONLY final answer."
+                "NO requests to localhost/127.0.0.1.",
+                "IF file_path exists, READ IT directly. Do not download it again.",
+                "PRINT ONLY final answer to stdout."
             ]
         }
 
@@ -182,8 +178,8 @@ class QuizAgent:
             INPUT: {json.dumps(context_payload)}
             
             RULES:
-            1. If `file_info.path` is None, check if the question implies fetching data from a URL.
-            2. If the question involves finding a "secret" in an HTML file, look for it in the text.
+            1. If `file_info.path` is NOT None, your code MUST open that file path. Do NOT try to fetch it from the internet.
+            2. If `file_info.path` IS None, and the question mentions a URL, use `requests`.
             3. Return JSON with keys: "thought_process" and "python_code".
             """
 
@@ -204,19 +200,27 @@ class QuizAgent:
                 
                 result = subprocess.run(["python", script_path], capture_output=True, text=True, cwd=self.work_dir, timeout=30)
                 
-                if result.returncode == 0:
-                    ans = result.stdout.strip()
-                    if not ans: 
-                        last_error = "Script printed nothing."
-                        continue
-                    logger.info(f"Answer: {ans[:100]}...")
-                    return ans
-                else:
-                    last_error = result.stderr
-                    logger.warning(f"Script Error: {last_error}")
+                output = result.stdout.strip()
+                error_out = result.stderr.strip()
+
+                if result.returncode != 0:
+                    last_error = error_out
+                    logger.warning(f"Script Failed: {last_error}")
+                    continue
+                
+                # [CRITICAL FIX] Check if output looks like an error message
+                if "error" in output.lower() or "exception" in output.lower() or not output:
+                    if not output: output = error_out # If stdout empty, check stderr
+                    last_error = f"Script printed an error message instead of answer: {output}"
+                    logger.warning(last_error)
+                    continue
+
+                logger.info(f"Answer: {output[:100]}...")
+                return output
 
             except Exception as e:
                 last_error = str(e)
+                logger.error(f"Execution Exception: {e}")
                 
         raise Exception("Solution failed after retries.")
 
@@ -230,8 +234,6 @@ class QuizAgent:
             visited.add(current_url)
             try:
                 page_md = self.scrape_page(current_url)
-                
-                # [FIX] Pass current_url to parser
                 task = self.parse_task(page_md, current_url)
                 
                 if task.get("submit_url"): 
