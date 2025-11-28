@@ -28,7 +28,6 @@ class QuizAgent:
         logger.info(f"Workspace created: {self.work_dir}")
 
     def scrape_page(self, url: str) -> str:
-        """Renders JS and converts to Markdown to preserve tables/structure."""
         logger.info(f"Scraping: {url}")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -36,26 +35,22 @@ class QuizAgent:
             try:
                 page.goto(url, wait_until="networkidle", timeout=15000)
                 content_html = page.content()
-                # Strip images/links to save tokens, keep tables
                 content_md = md(content_html, strip=['img', 'a']) 
                 return content_md
             except Exception as e:
                 logger.error(f"Scraping failed: {e}")
-                # Fallback: return raw text if MD fails
                 return "Error scraping page content."
             finally:
                 browser.close()
 
     def parse_task(self, page_content: str) -> Dict[str, Any]:
-        """Extracts structured instructions from the page."""
         system_prompt = (
             "You are a precise data analyst agent. Extract the following from the quiz page text:\n"
             "1. question: The specific question asked.\n"
-            "2. data_url: The URL of any file mentioned (CSV/PDF/etc). If relative, return as is. If none, null.\n"
+            "2. data_url: The URL of any file mentioned. Return null if none.\n"
             "3. submit_url: The URL to POST the answer to.\n"
             "4. answer_key: The JSON key expected for the answer (usually 'answer')."
         )
-        
         try:
             response = self.client.chat.completions.create(
                 model="gpt-4o",
@@ -70,90 +65,102 @@ class QuizAgent:
             logger.error(f"LLM Parsing failed: {e}")
             raise
 
+    def get_filename_from_cd(self, cd: str) -> Optional[str]:
+        """Extract filename from Content-Disposition header"""
+        if not cd:
+            return None
+        fname = re.findall('filename=(.+)', cd)
+        if len(fname) == 0:
+            return None
+        return fname[0].strip().strip('"').strip("'")
+
     def download_file(self, file_url: str, base_url: str) -> Optional[str]:
         if not file_url:
             return None
         
-        # Normalize URL
         full_url = urljoin(base_url, file_url)
+        logger.info(f"Downloading {full_url}")
         
-        # Clean Filename (Handle ?query=params)
-        parsed_url = urlparse(full_url)
-        filename = os.path.basename(parsed_url.path)
-        if not filename or "." not in filename:
-            filename = "data_file.dat" # Fallback
-        
-        # Decode URL encoded chars
-        filename = unquote(filename)
-        local_path = os.path.join(self.work_dir, filename)
-        
-        logger.info(f"Downloading {full_url} -> {local_path}")
         try:
             r = requests.get(full_url, verify=False, timeout=15)
             r.raise_for_status()
+            
+            # [FIX] Smart Filename Detection
+            filename = self.get_filename_from_cd(r.headers.get("Content-Disposition"))
+            if not filename:
+                filename = os.path.basename(urlparse(full_url).path)
+            
+            # [FIX] Handle URL parameters in filename or empty filename
+            if not filename or "." not in filename:
+                # Check Content-Type for hint
+                ctype = r.headers.get("Content-Type", "").lower()
+                if "html" in ctype:
+                    filename = "data.html"
+                elif "json" in ctype:
+                    filename = "data.json"
+                elif "csv" in ctype:
+                    filename = "data.csv"
+                else:
+                    filename = "data_file.dat"
+
+            filename = unquote(filename)
+            local_path = os.path.join(self.work_dir, filename)
+            
             with open(local_path, "wb") as f:
                 f.write(r.content)
+            
             return local_path
         except Exception as e:
             logger.error(f"Download failed: {e}")
             return None
 
     def inspect_file_content(self, file_path: str) -> str:
-        """
-        [CRITICAL FIX] 
-        Peeks into the file to give the LLM the ACTUAL column names/structure 
-        before it writes code. Prevents 'Column not found' errors.
-        """
         if not file_path or not os.path.exists(file_path):
             return "No file available."
         
         try:
-            # Try CSV
-            if file_path.endswith('.csv') or 'csv' in file_path:
+            # Check content for HTML even if extension is wrong
+            with open(file_path, 'r', errors='ignore') as f:
+                head = f.read(500)
+                if "<html" in head.lower() or "<!doctype html" in head.lower() or "<div" in head.lower():
+                    return f"File Type: HTML Source Code.\nPreview: {head}..."
+
+            if file_path.endswith('.csv'):
                 df = pd.read_csv(file_path, nrows=3)
-                return f"CSV Columns: {list(df.columns)}\nFirst Row: {df.iloc[0].to_dict()}"
+                return f"CSV Columns: {list(df.columns)}\nRow 1: {df.iloc[0].to_dict()}"
             
-            # Try JSON
-            if file_path.endswith('.json') or 'json' in file_path:
+            if file_path.endswith('.json'):
                 with open(file_path, 'r') as f:
                     data = json.load(f)
-                    if isinstance(data, list):
-                        return f"JSON List. First Item Keys: {list(data[0].keys()) if data else 'Empty'}"
-                    return f"JSON Keys: {list(data.keys())}"
+                    return f"JSON Keys: {list(data.keys()) if isinstance(data, dict) else 'List of items'}"
             
-            # Try Excel
             if file_path.endswith('.xlsx'):
                 df = pd.read_excel(file_path, nrows=3)
                 return f"Excel Columns: {list(df.columns)}"
 
-            # Text/Unknown
-            with open(file_path, 'r', errors='ignore') as f:
-                return f"File Start: {f.read(500)}"
-                
+            return f"Raw File Start: {head}"
         except Exception as e:
-            return f"Error inspecting file: {str(e)}"
+            return f"Inspection Error: {str(e)}"
 
     def execute_python_solution(self, question: str, data_path: str) -> Any:
         max_retries = 3
         last_error = None
-        
-        # [NEW] Get file metadata to prevent guessing
         file_metadata = self.inspect_file_content(data_path)
-        logger.info(f"File Metadata extracted: {file_metadata}")
+        
+        logger.info(f"Metadata: {file_metadata}")
 
         for attempt in range(max_retries):
-            logger.info(f"Code Gen Attempt {attempt+1}")
+            logger.info(f"Gen Attempt {attempt+1}")
             
             prompt = (
                 f"Goal: {question}\n"
-                f"Data File: '{data_path}'\n"
-                f"File Structure Preview: {file_metadata}\n"
-                "Write a Python script to calculate the answer.\n"
-                "CRITICAL RULES:\n"
-                "1. Use 'pypdf' for PDFs (NOT PyPDF2).\n"
-                "2. Use 'pandas' for CSV/Excel.\n"
-                "3. PRINT only the final answer to stdout.\n"
-                "4. If column names in the Preview match roughly, use the exact names from Preview.\n"
+                f"File Metadata: {file_metadata}\n"
+                "Write a Python script to solve this.\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. The variable 'file_path' is already defined for you. USE IT.\n"
+                "2. If metadata says HTML, use BeautifulSoup.\n"
+                "3. If CSV/Excel, use pandas.\n"
+                "4. PRINT ONLY the final answer.\n"
             )
             
             if last_error:
@@ -168,9 +175,13 @@ class QuizAgent:
             code_match = re.search(r"```python(.*?)```", raw_code, re.DOTALL)
             code = code_match.group(1).strip() if code_match else raw_code
             
+            # [FIX] INJECT PATH directly into the script
+            # This handles Windows/Linux path escaping automatically via python repr
+            injected_code = f"file_path = {repr(data_path)}\n" + code
+
             script_path = os.path.join(self.work_dir, "solve.py")
             with open(script_path, "w") as f:
-                f.write(code)
+                f.write(injected_code)
             
             try:
                 result = subprocess.run(
@@ -184,17 +195,17 @@ class QuizAgent:
                 if result.returncode == 0:
                     ans = result.stdout.strip()
                     if not ans:
-                        last_error = "Script ran but printed nothing. You MUST print(result)."
+                        last_error = "Script printed nothing. You must print(result)."
                         continue
-                    logger.info(f"Answer found: {ans}")
+                    logger.info(f"Answer: {ans}")
                     return ans
                 else:
                     last_error = result.stderr
-                    logger.warning(f"Script Error: {last_error}")
+                    logger.warning(f"Error: {last_error}")
             except Exception as e:
                 last_error = str(e)
                 
-        raise Exception("Failed to solve after retries.")
+        raise Exception("Solution failed after retries.")
 
     def solve_recursive(self, start_url: str, email: str, secret: str):
         current_url = start_url
@@ -210,14 +221,15 @@ class QuizAgent:
                 page_md = self.scrape_page(current_url)
                 task = self.parse_task(page_md)
                 
-                # Normalize Submit URL
                 if task.get("submit_url"):
                     task["submit_url"] = urljoin(current_url, task["submit_url"])
                 
                 data_path = self.download_file(task.get("data_url"), current_url)
+                
+                # Execute Logic
                 answer = self.execute_python_solution(task["question"], data_path)
                 
-                # Numeric sanitation
+                # Type sanitation
                 try:
                     clean_ans = str(answer).replace(',', '')
                     if '.' in clean_ans:
@@ -237,7 +249,6 @@ class QuizAgent:
                 logger.info(f"Submitting to {task['submit_url']}")
                 resp = requests.post(task['submit_url'], json=payload, verify=False, timeout=10)
                 resp_data = resp.json()
-                
                 history.append(resp_data)
                 
                 if resp_data.get("correct", False):
