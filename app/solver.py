@@ -92,29 +92,25 @@ class QuizAgent:
             return None # Try to solve without file if download fails (Edge Case)
 
     def execute_python_solution(self, question: str, data_path: str) -> Any:
-        """Generates and runs code in a loop to handle errors."""
         max_retries = 3
         last_error = None
-        
-        # Files available in workspace
-        files = os.listdir(self.work_dir)
         
         for attempt in range(max_retries):
             logger.info(f"Code Gen Attempt {attempt+1}")
             
             prompt = (
                 f"Question: {question}\n"
-                f"Data File Path: '{data_path}' (Verify file exists before reading)\n"
-                f"Working Directory: {self.work_dir}\n"
-                "Write a Python script to solve this. \n"
-                "RULES:\n"
-                "1. PRINT ONLY the final answer to stdout. No debug prints.\n"
-                "2. Handle CSV/Excel/PDF parsing using pandas/openpyxl/pypdf.\n"
-                "3. If the answer is a string, strip whitespace.\n"
+                f"Data File Path: '{data_path}'\n"
+                "Write a Python script to solve this.\n"
+                "CRITICAL RULES:\n"
+                "1. You MUST print the final answer to stdout using print().\n"
+                "2. Do NOT print debug messages, only the answer.\n"
+                "3. If using a function, remember to call it and print the result.\n"
+                "4. Handle data loading errors gracefully.\n"
             )
             
             if last_error:
-                prompt += f"\nPREVIOUS CODE FAILED: {last_error}\nFIX THE CODE."
+                prompt += f"\n\nPREVIOUS ERROR: {last_error}\nFix the code to ensure it prints the answer."
 
             completion = self.client.chat.completions.create(
                 model="gpt-4o",
@@ -122,7 +118,6 @@ class QuizAgent:
             )
             
             raw_code = completion.choices[0].message.content
-            # Extract code block
             code_match = re.search(r"```python(.*?)```", raw_code, re.DOTALL)
             code = code_match.group(1).strip() if code_match else raw_code
             
@@ -130,7 +125,6 @@ class QuizAgent:
             with open(script_path, "w") as f:
                 f.write(code)
             
-            # Execute safely
             try:
                 result = subprocess.run(
                     ["python", script_path],
@@ -142,6 +136,12 @@ class QuizAgent:
                 
                 if result.returncode == 0:
                     ans = result.stdout.strip()
+                    # [CRITICAL FIX] Check if output is empty
+                    if not ans:
+                        last_error = "Script executed successfully but printed NOTHING. Did you forget to print(result)?"
+                        logger.warning(f"Attempt {attempt+1} failed: Empty Output")
+                        continue # This triggers the retry loop
+                    
                     logger.info(f"Answer found: {ans}")
                     return ans
                 else:
@@ -150,7 +150,7 @@ class QuizAgent:
             except Exception as e:
                 last_error = str(e)
                 
-        raise Exception("Failed to solve question after retries")
+        raise Exception("Failed to solve question: Code generated no output or crashed.")
 
     def solve_recursive(self, start_url: str, email: str, secret: str):
         """The main loop handling the chain of quizzes."""
