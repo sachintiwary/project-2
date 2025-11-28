@@ -22,18 +22,12 @@ logger.setLevel(logging.INFO)
 class QuizAgent:
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
-        
-        # Using 1.5 Pro for maximum reasoning capability
         self.model_name = "gemini-2.5-pro" 
         self.model = genai.GenerativeModel(self.model_name)
-        
         self.work_dir = tempfile.mkdtemp(prefix="quiz_task_")
         logger.info(f"Workspace: {self.work_dir} | Model: {self.model_name}")
 
     def generate_with_backoff(self, prompt: str, is_json: bool = True) -> str:
-        """
-        Forces JSON mode to ensure structured output.
-        """
         config = {"response_mime_type": "application/json"} if is_json else None
         retries = 3
         for attempt in range(retries):
@@ -66,23 +60,35 @@ class QuizAgent:
             finally:
                 browser.close()
 
-    def parse_task(self, page_content: str) -> Dict[str, Any]:
+    def parse_task(self, page_content: str, current_url: str) -> Dict[str, Any]:
         """
-        Input: Raw Text
-        Output: JSON Structure
+        [SENIOR DEV FIX] We pass 'current_url' so the LLM knows the domain.
         """
+        parsed = urlparse(current_url)
+        base_domain = f"{parsed.scheme}://{parsed.netloc}"
+        
         prompt = f"""
         You are a data extraction agent. 
-        Analyze the following text and return a JSON object with these exact keys:
-        {{
-            "question": "The specific analysis question to answer",
-            "data_url": "The full URL of the data file mentioned (or null if none)",
-            "submit_url": "The full URL to POST the answer to",
-            "answer_key": "The JSON key required for the answer (usually 'answer')"
-        }}
+        
+        CONTEXT:
+        - The current page URL is: {current_url}
+        - The Base Domain is: {base_domain}
+        
+        INSTRUCTIONS:
+        1. Extract the question and URLs.
+        2. **CRITICAL**: If a URL is relative (e.g., "/submit" or has a placeholder like <span class="origin">), YOU MUST PREPEND the Base Domain ({base_domain}).
+        3. Do NOT assume localhost. Use the provided Base Domain.
 
         PAGE CONTENT:
         {page_content}
+
+        OUTPUT JSON:
+        {{
+            "question": "The specific analysis question",
+            "data_url": "Full absolute URL of data file (or null)",
+            "submit_url": "Full absolute URL for submission",
+            "answer_key": "JSON key for answer"
+        }}
         """
         try:
             text_resp = self.generate_with_backoff(prompt, is_json=True)
@@ -152,73 +158,56 @@ class QuizAgent:
         last_error = None
         file_metadata = self.inspect_file_content(data_path)
         
-        # 1. Construct the Input Context Object
-        # This is the "JSON Prompt" strategy
+        # [SENIOR DEV FIX] We define the "requests" environment for the LLM
         context_payload = {
-            "task": "Write a Python script to solve the user's question.",
-            "user_question": question,
-            "environment": {
-                "file_path": data_path if data_path else None,
-                "file_metadata": file_metadata,
-                "working_directory": self.work_dir
+            "task": "Write Python script to solve question.",
+            "question": question,
+            "file_info": {
+                "path": data_path if data_path else None,
+                "metadata": file_metadata
             },
             "constraints": [
-                "Do NOT use Selenium, Webdriver, or Browsers.",
-                "Use 'requests' for HTTP calls if needed.",
-                "Use 'pandas', 'json', 'BeautifulSoup', 'pypdf' as needed.",
-                "The script must PRINT only the final answer to stdout."
+                "NO Selenium/Webdriver.",
+                "Use 'requests' for API calls.",
+                "If file_path is None, the data might be at a URL described in the question.",
+                "PRINT ONLY final answer."
             ]
         }
 
         for attempt in range(max_retries):
             logger.info(f"Gen Attempt {attempt+1}")
             
-            if last_error:
-                context_payload["previous_error"] = last_error
-
-            # 2. Send the Prompt
             prompt = f"""
-            Act as a Senior Python Developer.
+            Act as a Python Developer.
+            INPUT: {json.dumps(context_payload)}
             
-            INPUT CONTEXT:
-            {json.dumps(context_payload, indent=2)}
-
-            RESPONSE FORMAT (Must be valid JSON):
-            {{
-                "thought_process": "Analyze the file path status and metadata. Explain your plan.",
-                "python_code": "The executable python code string. Must handle imports."
-            }}
+            RULES:
+            1. If `file_info.path` is None, check if the question implies fetching data from a URL.
+            2. If the question involves finding a "secret" in an HTML file, look for it in the text.
+            3. Return JSON with keys: "thought_process" and "python_code".
             """
 
-            # 3. Get JSON Response
-            response_text = self.generate_with_backoff(prompt, is_json=True)
-            
+            if last_error: prompt += f"\nPREVIOUS ERROR: {last_error}"
+
             try:
+                response_text = self.generate_with_backoff(prompt, is_json=True)
                 llm_response = json.loads(response_text)
-                
-                # Extract logic
-                reasoning = llm_response.get("thought_process", "No reasoning provided.")
                 code = llm_response.get("python_code", "")
                 
-                logger.info(f"LLM Thoughts: {reasoning}")
-                
-                if not code:
-                    raise ValueError("LLM returned empty code.")
+                if not code: raise ValueError("Empty code generated")
 
-                # Inject Path Variable safety
                 path_val = repr(data_path) if data_path else "None"
                 injected_code = f"import base64\nfile_path = {path_val}\n" + code
 
                 script_path = os.path.join(self.work_dir, "solve.py")
                 with open(script_path, "w") as f: f.write(injected_code)
                 
-                # Execute
                 result = subprocess.run(["python", script_path], capture_output=True, text=True, cwd=self.work_dir, timeout=30)
                 
                 if result.returncode == 0:
                     ans = result.stdout.strip()
                     if not ans: 
-                        last_error = "Script executed successfully but printed NOTHING."
+                        last_error = "Script printed nothing."
                         continue
                     logger.info(f"Answer: {ans[:100]}...")
                     return ans
@@ -226,8 +215,6 @@ class QuizAgent:
                     last_error = result.stderr
                     logger.warning(f"Script Error: {last_error}")
 
-            except json.JSONDecodeError:
-                last_error = "LLM failed to return valid JSON."
             except Exception as e:
                 last_error = str(e)
                 
@@ -243,7 +230,9 @@ class QuizAgent:
             visited.add(current_url)
             try:
                 page_md = self.scrape_page(current_url)
-                task = self.parse_task(page_md)
+                
+                # [FIX] Pass current_url to parser
+                task = self.parse_task(page_md, current_url)
                 
                 if task.get("submit_url"): 
                     task["submit_url"] = urljoin(current_url, task["submit_url"])
