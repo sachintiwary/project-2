@@ -5,6 +5,7 @@ import requests
 import subprocess
 import tempfile
 import time
+import base64
 import pandas as pd
 from typing import Dict, Any, Optional
 from urllib.parse import urljoin, urlparse, unquote
@@ -22,7 +23,8 @@ logger.setLevel(logging.INFO)
 class QuizAgent:
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
-        self.model_name = "gemini-2.5-pro" 
+        # Using a model with good reasoning capabilities
+        self.model_name = "gemini-2.5-pro" # Faster/Cheaper, usually sufficient. Use Pro if needed.
         self.model = genai.GenerativeModel(self.model_name)
         self.work_dir = tempfile.mkdtemp(prefix="quiz_task_")
         logger.info(f"Workspace: {self.work_dir} | Model: {self.model_name}")
@@ -34,14 +36,9 @@ class QuizAgent:
             try:
                 response = self.model.generate_content(prompt, generation_config=config)
                 return response.text
-            except exceptions.ResourceExhausted:
-                wait_time = 20
-                logger.warning(f"Rate Limit ({self.model_name}). Sleeping {wait_time}s...")
-                time.sleep(wait_time)
-                continue
             except Exception as e:
-                logger.error(f"GenAI Error: {e}")
-                raise
+                logger.warning(f"GenAI Attempt {attempt+1} failed: {e}")
+                time.sleep(2 * (attempt + 1))
         raise Exception("Failed to generate content after retries.")
 
     def scrape_page(self, url: str) -> str:
@@ -50,9 +47,11 @@ class QuizAgent:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             try:
-                page.goto(url, wait_until="networkidle", timeout=20000)
+                # 60s timeout for heavy JS pages
+                page.goto(url, wait_until="networkidle", timeout=60000)
                 content_html = page.content()
-                content_md = md(content_html, strip=['img', 'a']) 
+                # Keep tables and basic structure
+                content_md = md(content_html, strip=['img', 'a', 'script', 'style']) 
                 return content_md
             except Exception as e:
                 logger.error(f"Scraping failed: {e}")
@@ -65,226 +64,196 @@ class QuizAgent:
         base_domain = f"{parsed.scheme}://{parsed.netloc}"
         
         prompt = f"""
-        You are a data extraction agent. 
+        Extract quiz details from this page content.
+        
         CONTEXT:
-        - Current Page: {current_url}
+        - Page URL: {current_url}
         - Base Domain: {base_domain}
         
         INSTRUCTIONS:
-        1. Extract the question and URLs.
-        2. **CRITICAL**: The page might use "example.com" or "localhost" as placeholders. YOU MUST REPLACE THEM with the Base Domain ({base_domain}).
-        3. If a URL is relative (e.g. /submit), prepend the Base Domain.
-
-        PAGE CONTENT:
-        {page_content}
+        1. Identify the Question.
+        2. Identify the Data URL (if any file needs downloading).
+        3. Identify the Submit URL (where to POST answer).
+        4. Identify the JSON key expected for the answer (usually "answer").
+        
+        CRITICAL DOMAIN FIX:
+        - If a URL is relative (starts with /), prepend {base_domain}.
+        - If a URL uses "localhost" or "example.com", REPLACE it with {base_domain} UNLESS it is a real external link.
+        
+        CONTENT:
+        {page_content[:15000]} 
 
         OUTPUT JSON:
         {{
-            "question": "The specific analysis question",
-            "data_url": "Full absolute URL of data file (or null)",
-            "submit_url": "Full absolute URL for submission",
-            "answer_key": "JSON key for answer"
+            "question": "...",
+            "data_url": "...",
+            "submit_url": "...",
+            "answer_key": "answer" 
         }}
         """
         try:
             text_resp = self.generate_with_backoff(prompt, is_json=True)
             data = json.loads(text_resp)
             
-            # [SENIOR DEV FIX] Hard-code URL Sanitization
-            # If LLM still returns example.com, we fix it in Python.
+            # Python-side Sanitization
             for key in ["data_url", "submit_url"]:
                 val = data.get(key)
-                if val and ("example.com" in val or "localhost" in val):
-                    # Replace the domain with our actual domain
-                    parsed_val = urlparse(val)
-                    new_val = urljoin(base_domain, parsed_val.path)
-                    if parsed_val.query: new_val += "?" + parsed_val.query
-                    data[key] = new_val
-                    logger.info(f"Sanitized {key}: {val} -> {new_val}")
-            
+                if val:
+                    # Fix relative paths
+                    if val.startswith("/"):
+                        data[key] = urljoin(base_domain, val)
+                    # Fix placeholder domains
+                    elif "example.com" in val or "localhost" in val:
+                        p_val = urlparse(val)
+                        new_val = urljoin(base_domain, p_val.path)
+                        if p_val.query: new_val += "?" + p_val.query
+                        data[key] = new_val
+                        
             return data
         except Exception as e:
             logger.error(f"Parsing failed: {e}")
             raise
 
-    def get_filename_from_cd(self, cd: str) -> Optional[str]:
-        if not cd: return None
-        import re
-        fname = re.findall('filename=(.+)', cd)
-        if len(fname) == 0: return None
-        return fname[0].strip().strip('"').strip("'")
-
-    def download_file(self, file_url: str, base_url: str) -> Optional[str]:
+    def download_file(self, file_url: str) -> Optional[str]:
         if not file_url: return None
-        full_url = urljoin(base_url, file_url)
-        logger.info(f"Downloading {full_url}")
+        logger.info(f"Downloading {file_url}")
         try:
-            r = requests.get(full_url, verify=False, timeout=15)
+            r = requests.get(file_url, verify=False, timeout=15)
             r.raise_for_status()
             
-            filename = self.get_filename_from_cd(r.headers.get("Content-Disposition"))
-            if not filename: filename = os.path.basename(urlparse(full_url).path)
+            # Simple filename deduction
+            filename = os.path.basename(urlparse(file_url).path)
+            if not filename or "." not in filename: filename = "data.file"
             
-            if not filename or "." not in filename:
-                ctype = r.headers.get("Content-Type", "").lower()
-                if "html" in ctype: filename = "data.html"
-                elif "json" in ctype: filename = "data.json"
-                elif "csv" in ctype: filename = "data.csv"
-                else: filename = "data_file.dat"
-
-            filename = unquote(filename)
-            local_path = os.path.join(self.work_dir, filename)
-            
+            local_path = os.path.join(self.work_dir, unquote(filename))
             with open(local_path, "wb") as f: f.write(r.content)
             return local_path
         except Exception as e:
             logger.error(f"Download failed: {e}")
             return None
 
-    def inspect_file_content(self, file_path: str) -> str:
-        if not file_path or not os.path.exists(file_path): return "No file available."
-        try:
-            with open(file_path, 'r', errors='ignore') as f:
-                head = f.read(500)
-                if "<html" in head.lower(): return f"File Type: HTML Source.\nPreview: {head}..."
-            
-            if file_path.endswith('.csv'):
-                df = pd.read_csv(file_path, nrows=3)
-                return f"CSV Columns: {list(df.columns)}\nRow 1: {df.iloc[0].to_dict()}"
-            if file_path.endswith('.json'):
-                with open(file_path, 'r') as f:
-                    data = json.load(f)
-                    preview = list(data.keys()) if isinstance(data, dict) else "List"
-                    return f"JSON Structure: {preview}"
-            if file_path.endswith('.xlsx'):
-                df = pd.read_excel(file_path, nrows=3)
-                return f"Excel Columns: {list(df.columns)}"
-            
-            return f"Raw File Start: {head}"
-        except Exception as e: return f"Inspection Error: {str(e)}"
-
-    def execute_python_solution(self, question: str, data_path: str, base_domain: str) -> Any:
+    def execute_python_solution(self, question: str, data_path: str) -> Any:
         max_retries = 3
         last_error = None
-        file_metadata = self.inspect_file_content(data_path)
         
-        context_payload = {
-            "task": "Write Python script to solve question.",
-            "question": question,
-            "environment": {
-                "file_path": data_path if data_path else None,
-                "base_domain": base_domain, # Pass domain to script generator
-                "file_metadata": file_metadata
-            },
-            "constraints": [
-                "NO Selenium/Webdriver.",
-                f"Any URL pointing to 'example.com' MUST be replaced with '{base_domain}'",
-                "IF file_path exists, READ IT directly.",
-                "PRINT ONLY final answer."
-            ]
-        }
+        # Gather context
+        file_info = ""
+        if data_path and os.path.exists(data_path):
+            file_info = f"File available at: '{data_path}'."
+            if data_path.endswith(".csv"):
+                try:
+                    df = pd.read_csv(data_path, nrows=2)
+                    file_info += f"\nColumns: {list(df.columns)}"
+                except: pass
 
         for attempt in range(max_retries):
-            logger.info(f"Gen Attempt {attempt+1}")
-            
             prompt = f"""
-            Act as a Senior Python Developer.
-            INPUT: {json.dumps(context_payload)}
+            Write a Python script to solve this question.
+            QUESTION: {question}
+            CONTEXT: {file_info}
             
-            RULES:
-            1. If `file_info.path` is NOT None, READ THAT FILE.
-            2. If you need to fetch data from a URL, and the URL is 'example.com', YOU MUST REPLACE THE DOMAIN with '{base_domain}'.
-            3. Return JSON: {{"thought_process": "...", "python_code": "..."}}.
+            ENVIRONMENT:
+            - Python 3.10+
+            - Libraries: pandas, numpy, sklearn, scipy, matplotlib, seaborn, pypdf
+            
+            REQUIREMENTS:
+            1. Calculate the answer.
+            2. If the answer is a NUMBER/STRING: Print it directly to stdout.
+            3. If the answer is an IMAGE/PLOT: Save it to 'plot.png', convert 'plot.png' to a Base64 Data URI string, and print the string.
+            4. Handle exceptions gracefully.
+            5. Return JSON: {{"code": "python code here"}}
             """
-
-            if last_error: prompt += f"\nPREVIOUS ERROR: {last_error}"
+            
+            if last_error:
+                prompt += f"\nPREVIOUS ERROR: {last_error}\nFix the code."
 
             try:
-                response_text = self.generate_with_backoff(prompt, is_json=True)
-                llm_response = json.loads(response_text)
-                code = llm_response.get("python_code", "")
+                resp = self.generate_with_backoff(prompt, is_json=True)
+                code = json.loads(resp).get("code", "")
                 
-                if not code: raise ValueError("Empty code generated")
-
-                path_val = repr(data_path) if data_path else "None"
-                injected_code = f"import base64\nfile_path = {path_val}\n" + code
-
+                # Write and Run
                 script_path = os.path.join(self.work_dir, "solve.py")
-                with open(script_path, "w") as f: f.write(injected_code)
+                with open(script_path, "w") as f: f.write(code)
                 
-                result = subprocess.run(["python", script_path], capture_output=True, text=True, cwd=self.work_dir, timeout=30)
+                result = subprocess.run(
+                    ["python", script_path], 
+                    capture_output=True, text=True, cwd=self.work_dir, timeout=40
+                )
                 
                 output = result.stdout.strip()
-                error_out = result.stderr.strip()
-
                 if result.returncode != 0:
-                    last_error = error_out
-                    logger.warning(f"Script Failed: {last_error}")
+                    last_error = result.stderr
                     continue
-                
-                # Filter out error messages in stdout
-                if "error" in output.lower() and len(output) > 50:
-                    last_error = f"Script returned error text: {output}"
-                    logger.warning(last_error)
-                    continue
-
+                    
                 if not output:
-                    last_error = "Script printed nothing."
+                    last_error = "Script ran but printed nothing."
                     continue
-
-                logger.info(f"Answer: {output[:100]}...")
-                return output
+                    
+                return output # Success
 
             except Exception as e:
                 last_error = str(e)
-                logger.error(f"Execution Exception: {e}")
-                
-        raise Exception("Solution failed after retries.")
+        
+        return None
 
     def solve_recursive(self, start_url: str, email: str, secret: str):
         current_url = start_url
-        visited = set()
         history = []
-
-        while current_url:
-            if current_url in visited: break
-            visited.add(current_url)
+        
+        # Limit recursion depth to prevent infinite loops
+        for _ in range(5):
+            if not current_url: break
             
-            parsed = urlparse(current_url)
-            base_domain = f"{parsed.scheme}://{parsed.netloc}"
-
+            logger.info(f"Processing Task: {current_url}")
             try:
+                # 1. Scrape & Parse
                 page_md = self.scrape_page(current_url)
                 task = self.parse_task(page_md, current_url)
                 
-                if task.get("submit_url"): 
-                    task["submit_url"] = urljoin(current_url, task["submit_url"])
+                # 2. Get Data
+                data_path = self.download_file(task.get("data_url"))
                 
-                data_path = self.download_file(task.get("data_url"), current_url)
+                # 3. Solve
+                answer = self.execute_python_solution(task["question"], data_path)
                 
-                # Pass base_domain to execution so it can fix URLs in the code
-                answer = self.execute_python_solution(task["question"], data_path, base_domain)
-                
+                # 4. Format Answer
+                # Try to convert to number if it looks like one, otherwise keep string
+                final_answer = answer
                 try:
-                    if isinstance(answer, str) and len(answer) < 20:
-                        clean = answer.replace(',', '')
-                        json_answer = float(clean) if '.' in clean else int(clean)
-                    else: json_answer = answer
-                except: json_answer = answer 
+                    if answer.replace('.','',1).isdigit():
+                        final_answer = float(answer) if '.' in answer else int(answer)
+                except: pass
 
-                payload = {"email": email, "secret": secret, "url": current_url, task.get("answer_key", "answer"): json_answer}
+                # 5. Submit
+                submit_url = task.get("submit_url")
+                payload = {
+                    "email": email, 
+                    "secret": secret, 
+                    "url": current_url, 
+                    task.get("answer_key", "answer"): final_answer
+                }
                 
-                logger.info(f"Submitting to {task['submit_url']}")
-                resp = requests.post(task['submit_url'], json=payload, verify=False, timeout=10)
-                resp_data = resp.json()
-                history.append(resp_data)
+                logger.info(f"Submitting to {submit_url}")
+                resp = requests.post(submit_url, json=payload, verify=False, timeout=30)
                 
-                if resp_data.get("correct", False):
-                    next_url = resp_data.get("url")
-                    if next_url: current_url = next_url
-                    else: return {"status": "completed", "history": history}
-                else: return {"status": "failed", "reason": resp_data, "history": history}
+                if resp.status_code == 200:
+                    resp_data = resp.json()
+                    history.append(resp_data)
+                    logger.info(f"Result: {resp_data}")
+                    
+                    if resp_data.get("correct", False):
+                        next_url = resp_data.get("url")
+                        if next_url:
+                            current_url = next_url # Recursion step
+                        else:
+                            return # Done!
+                    else:
+                        logger.warning("Incorrect answer. Retrying not implemented in this snippet to save recursion depth.")
+                        return 
+                else:
+                    logger.error(f"Submission failed: {resp.status_code} {resp.text}")
+                    return
+
             except Exception as e:
-                logger.error(f"Loop error: {e}", exc_info=True)
-                return {"status": "error", "message": str(e)}
-        return {"status": "completed", "history": history}
+                logger.error(f"Error in loop: {e}")
+                return
