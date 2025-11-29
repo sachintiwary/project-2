@@ -24,7 +24,7 @@ class QuizAgent:
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
         # Using a model with good reasoning capabilities
-        self.model_name = "gemini-2.5-pro" # Faster/Cheaper, usually sufficient. Use Pro if needed.
+        self.model_name = "gemini-2.5-flash" # Faster/Cheaper, usually sufficient. Use Pro if needed.
         self.model = genai.GenerativeModel(self.model_name)
         self.work_dir = tempfile.mkdtemp(prefix="quiz_task_")
         logger.info(f"Workspace: {self.work_dir} | Model: {self.model_name}")
