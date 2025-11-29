@@ -22,7 +22,6 @@ logger.setLevel(logging.INFO)
 class QuizAgent:
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
-        # Using 1.5 Pro (The smartest available public model)
         self.model_name = "gemini-2.5-pro" 
         self.model = genai.GenerativeModel(self.model_name)
         self.work_dir = tempfile.mkdtemp(prefix="quiz_task_")
@@ -73,8 +72,8 @@ class QuizAgent:
         
         INSTRUCTIONS:
         1. Extract the question and URLs.
-        2. If a URL is relative (e.g. starts with / or has <span class="origin">), PREPEND the Base Domain.
-        3. Do NOT assume localhost.
+        2. **CRITICAL**: The page might use "example.com" or "localhost" as placeholders. YOU MUST REPLACE THEM with the Base Domain ({base_domain}).
+        3. If a URL is relative (e.g. /submit), prepend the Base Domain.
 
         PAGE CONTENT:
         {page_content}
@@ -89,7 +88,21 @@ class QuizAgent:
         """
         try:
             text_resp = self.generate_with_backoff(prompt, is_json=True)
-            return json.loads(text_resp)
+            data = json.loads(text_resp)
+            
+            # [SENIOR DEV FIX] Hard-code URL Sanitization
+            # If LLM still returns example.com, we fix it in Python.
+            for key in ["data_url", "submit_url"]:
+                val = data.get(key)
+                if val and ("example.com" in val or "localhost" in val):
+                    # Replace the domain with our actual domain
+                    parsed_val = urlparse(val)
+                    new_val = urljoin(base_domain, parsed_val.path)
+                    if parsed_val.query: new_val += "?" + parsed_val.query
+                    data[key] = new_val
+                    logger.info(f"Sanitized {key}: {val} -> {new_val}")
+            
+            return data
         except Exception as e:
             logger.error(f"Parsing failed: {e}")
             raise
@@ -150,7 +163,7 @@ class QuizAgent:
             return f"Raw File Start: {head}"
         except Exception as e: return f"Inspection Error: {str(e)}"
 
-    def execute_python_solution(self, question: str, data_path: str) -> Any:
+    def execute_python_solution(self, question: str, data_path: str, base_domain: str) -> Any:
         max_retries = 3
         last_error = None
         file_metadata = self.inspect_file_content(data_path)
@@ -158,15 +171,16 @@ class QuizAgent:
         context_payload = {
             "task": "Write Python script to solve question.",
             "question": question,
-            "file_info": {
-                "path": data_path if data_path else None,
-                "metadata": file_metadata
+            "environment": {
+                "file_path": data_path if data_path else None,
+                "base_domain": base_domain, # Pass domain to script generator
+                "file_metadata": file_metadata
             },
             "constraints": [
                 "NO Selenium/Webdriver.",
-                "NO requests to localhost/127.0.0.1.",
-                "IF file_path exists, READ IT directly. Do not download it again.",
-                "PRINT ONLY final answer to stdout."
+                f"Any URL pointing to 'example.com' MUST be replaced with '{base_domain}'",
+                "IF file_path exists, READ IT directly.",
+                "PRINT ONLY final answer."
             ]
         }
 
@@ -174,13 +188,13 @@ class QuizAgent:
             logger.info(f"Gen Attempt {attempt+1}")
             
             prompt = f"""
-            Act as a Python Developer.
+            Act as a Senior Python Developer.
             INPUT: {json.dumps(context_payload)}
             
             RULES:
-            1. If `file_info.path` is NOT None, your code MUST open that file path. Do NOT try to fetch it from the internet.
-            2. If `file_info.path` IS None, and the question mentions a URL, use `requests`.
-            3. Return JSON with keys: "thought_process" and "python_code".
+            1. If `file_info.path` is NOT None, READ THAT FILE.
+            2. If you need to fetch data from a URL, and the URL is 'example.com', YOU MUST REPLACE THE DOMAIN with '{base_domain}'.
+            3. Return JSON: {{"thought_process": "...", "python_code": "..."}}.
             """
 
             if last_error: prompt += f"\nPREVIOUS ERROR: {last_error}"
@@ -208,11 +222,14 @@ class QuizAgent:
                     logger.warning(f"Script Failed: {last_error}")
                     continue
                 
-                # [CRITICAL FIX] Check if output looks like an error message
-                if "error" in output.lower() or "exception" in output.lower() or not output:
-                    if not output: output = error_out # If stdout empty, check stderr
-                    last_error = f"Script printed an error message instead of answer: {output}"
+                # Filter out error messages in stdout
+                if "error" in output.lower() and len(output) > 50:
+                    last_error = f"Script returned error text: {output}"
                     logger.warning(last_error)
+                    continue
+
+                if not output:
+                    last_error = "Script printed nothing."
                     continue
 
                 logger.info(f"Answer: {output[:100]}...")
@@ -232,6 +249,10 @@ class QuizAgent:
         while current_url:
             if current_url in visited: break
             visited.add(current_url)
+            
+            parsed = urlparse(current_url)
+            base_domain = f"{parsed.scheme}://{parsed.netloc}"
+
             try:
                 page_md = self.scrape_page(current_url)
                 task = self.parse_task(page_md, current_url)
@@ -240,7 +261,9 @@ class QuizAgent:
                     task["submit_url"] = urljoin(current_url, task["submit_url"])
                 
                 data_path = self.download_file(task.get("data_url"), current_url)
-                answer = self.execute_python_solution(task["question"], data_path)
+                
+                # Pass base_domain to execution so it can fix URLs in the code
+                answer = self.execute_python_solution(task["question"], data_path, base_domain)
                 
                 try:
                     if isinstance(answer, str) and len(answer) < 20:
