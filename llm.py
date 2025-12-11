@@ -97,21 +97,45 @@ def ask_llm_with_image(prompt: str, image_url: str = None, image_base64: str = N
 def transcribe_audio(audio_path: str) -> str:
     """
     Transcribe audio file using Whisper API via AI Pipe
+    Uses direct HTTP request for better compatibility
     """
-    client = get_client()
+    import requests
+    
+    api_key = AIPIPE_TOKEN or os.getenv("AIPIPE_TOKEN")
+    if not api_key:
+        raise ValueError("AIPIPE_TOKEN not set")
+    
     try:
         logger.info(f"Transcribing audio: {audio_path}")
         
-        with open(audio_path, "rb") as audio_file:
-            response = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file
-            )
+        # Use direct HTTP request to AI Pipe
+        url = "https://aipipe.org/openai/v1/audio/transcriptions"
         
-        result = response.text
-        logger.info(f"Transcription complete: {result[:100]}...")
-        return result
+        with open(audio_path, "rb") as audio_file:
+            files = {
+                'file': (os.path.basename(audio_path), audio_file, 'audio/ogg'),
+            }
+            data = {
+                'model': 'gpt-4o-transcribe',
+            }
+            headers = {
+                'Authorization': f'Bearer {api_key}',
+            }
+            
+            response = requests.post(url, files=files, data=data, headers=headers, timeout=60)
+            
+        logger.info(f"Transcription response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            result = response.json()
+            text = result.get('text', '')
+            logger.info(f"Transcription complete: {text}")
+            return text
+        else:
+            logger.error(f"Transcription failed: {response.text}")
+            raise Exception(f"Transcription API error: {response.status_code} - {response.text}")
         
     except Exception as e:
         logger.error(f"Audio transcription error: {e}")
         raise
+
