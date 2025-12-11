@@ -1,27 +1,28 @@
 """
-Main solver orchestrator
-Coordinates page rendering, task detection, solving, and submission
+Universal Solver - LLM-driven approach to solve ANY quiz task
 """
 import re
 import json
 import logging
-import requests
-from typing import Any, Optional
+import traceback
+from typing import Any, Optional, Dict, List
 from urllib.parse import urljoin
 
-from browser import render_page, download_file
+from browser import render_page, download_file as browser_download
 from llm import ask_llm, ask_llm_with_image, transcribe_audio
 from submitter import submit_answer
+import tools
 
 logger = logging.getLogger(__name__)
 
+# Email for offset calculations
+USER_EMAIL = "23f3003663@ds.study.iitm.ac.in"
+
 
 def solve_quiz(email: str, secret: str, url: str):
-    """
-    Main entry point - solve a quiz and handle the chain of questions
-    """
+    """Main entry point - solve a quiz and handle the chain of questions"""
     current_url = url
-    max_questions = 20  # Safety limit
+    max_questions = 20
     question_count = 0
     
     while current_url and question_count < max_questions:
@@ -34,8 +35,8 @@ def solve_quiz(email: str, secret: str, url: str):
             # Step 1: Render the page
             page_data = render_page(current_url)
             
-            # Step 2: Solve the question
-            answer = solve_question(page_data)
+            # Step 2: Solve the question using universal solver
+            answer = solve_question_universal(page_data, email)
             
             if answer is None:
                 logger.error("Failed to solve question - no answer generated")
@@ -72,520 +73,273 @@ def solve_quiz(email: str, secret: str, url: str):
     logger.info(f"\nCompleted {question_count} questions")
 
 
-def solve_question(page_data: dict) -> Any:
+def solve_question_universal(page_data: dict, email: str) -> Any:
     """
-    Analyze the question and generate an answer
+    Universal question solver - uses LLM to understand and solve ANY task
     """
     content = page_data["content"]
     html = page_data["html"]
     base_url = page_data["base_url"]
     
-    logger.info("Analyzing question...")
+    logger.info("Analyzing question with universal solver...")
     
-    # Detect task type and solve accordingly
-    task_type = detect_task_type(content, html)
-    logger.info(f"Detected task type: {task_type}")
+    # Step 1: Extract all resources (URLs, files) from the page
+    resources = extract_resources(html, content, base_url)
+    logger.info(f"Found resources: {list(resources.keys())}")
     
-    if task_type == "audio":
-        return solve_audio_task(content, html, base_url)
-    elif task_type == "image":
-        return solve_image_task(content, html, base_url)
-    elif task_type == "file_download":
-        return solve_file_task(content, html, base_url)
-    elif task_type == "api":
-        return solve_api_task(content, html, base_url)
-    else:
-        # Default: use LLM to solve text-based question
-        return solve_text_task(content)
+    # Step 2: Determine task type and solve accordingly
+    task_analysis = analyze_task(content, resources)
+    logger.info(f"Task analysis: {task_analysis['type']}")
+    
+    # Step 3: Execute the appropriate solution strategy
+    try:
+        if task_analysis['type'] == 'audio':
+            answer = solve_audio(resources, content)
+        elif task_analysis['type'] == 'image':
+            answer = solve_image(resources, content, base_url)
+        elif task_analysis['type'] == 'api_call':
+            answer = solve_api_call(resources, content, email)
+        elif task_analysis['type'] == 'data_processing':
+            answer = solve_data_processing(resources, content, email)
+        elif task_analysis['type'] == 'visualization':
+            answer = solve_visualization(resources, content)
+        else:
+            # Default: Let LLM solve with context
+            answer = solve_with_llm(resources, content, email)
+        
+        # Step 4: Clean and validate answer
+        answer = clean_and_validate_answer(answer, content)
+        logger.info(f"Final answer: {str(answer)[:200]}")
+        
+        return answer
+        
+    except Exception as e:
+        logger.error(f"Solution error: {e}")
+        traceback.print_exc()
+        # Fallback to pure LLM
+        return solve_with_pure_llm(content, email)
 
 
-def detect_task_type(content: str, html: str) -> str:
-    """Detect the type of task from page content AND html"""
+def extract_resources(html: str, content: str, base_url: str) -> Dict:
+    """Extract all resources (files, links, APIs) from the page"""
+    resources = {}
+    
+    # File patterns
+    file_patterns = {
+        'pdf': r'href=["\']([^"\']+\.pdf)["\']',
+        'csv': r'href=["\']([^"\']+\.csv)["\']',
+        'json': r'href=["\']([^"\']+\.json)["\']',
+        'zip': r'href=["\']([^"\']+\.zip)["\']',
+        'audio': r'href=["\']([^"\']+\.(?:mp3|wav|opus|ogg|m4a))["\']',
+        'image': r'(?:href|src)=["\']([^"\']+\.(?:png|jpg|jpeg|gif))["\']',
+        'excel': r'href=["\']([^"\']+\.(?:xlsx|xls))["\']',
+    }
+    
+    for file_type, pattern in file_patterns.items():
+        matches = re.findall(pattern, html, re.IGNORECASE)
+        if matches:
+            resources[file_type] = []
+            for match in matches:
+                url = match if match.startswith('http') else urljoin(base_url + '/', match.lstrip('/'))
+                resources[file_type].append(url)
+    
+    # Extract API mentions
+    api_patterns = [
+        r'GET\s+(/[^\s]+)',
+        r'POST\s+(/[^\s]+)',
+        r'api\.github\.com',
+        r'https?://[^\s<>"\']+/api/[^\s<>"\']+',
+    ]
+    
+    for pattern in api_patterns:
+        if re.search(pattern, content, re.IGNORECASE):
+            resources['has_api'] = True
+            break
+    
+    return resources
+
+
+def analyze_task(content: str, resources: Dict) -> Dict:
+    """Analyze what type of task this is"""
     content_lower = content.lower()
-    html_lower = html.lower()
     
-    # Check for audio FIRST (priority) - check both content and HTML
-    audio_keywords = ['transcribe', 'audio', 'listen', 'spoken', 'passphrase', 'speech']
-    if any(kw in content_lower for kw in audio_keywords):
-        return "audio"
-    if re.search(r'\.(mp3|wav|ogg|m4a|opus)\b', html_lower):
-        return "audio"
+    # Keywords for task detection
+    if 'audio' in resources or any(kw in content_lower for kw in ['transcribe', 'listen', 'spoken', 'audio']):
+        return {'type': 'audio'}
     
-    # Check for image tasks
-    image_keywords = ['heatmap', 'dominant color', 'image', 'chart', 'graph', 'picture']
-    if any(kw in content_lower for kw in image_keywords):
-        return "image"
-    if re.search(r'\.(png|jpg|jpeg|gif)\b', content_lower):
-        return "image"
+    if 'image' in resources and any(kw in content_lower for kw in ['color', 'heatmap', 'chart', 'image', 'picture']):
+        return {'type': 'image'}
     
-    # Check for file downloads (log files, zip files too!)
-    if re.search(r'\.(pdf|csv|json|xlsx|xls|log|txt|zip)\b', html_lower):
-        return "file_download"
+    if resources.get('has_api') or any(kw in content_lower for kw in ['github api', 'api:', 'get /', 'post /']):
+        return {'type': 'api_call'}
     
-    # Check for API tasks
-    if 'api' in content_lower and ('curl' in content_lower or 'endpoint' in content_lower):
-        return "api"
+    if 'json' in resources or 'csv' in resources or 'zip' in resources or 'pdf' in resources:
+        return {'type': 'data_processing'}
     
-    # Check for uv command tasks
-    if 'uv' in content_lower and ('command' in content_lower or 'http' in content_lower):
-        return "api"
+    if any(kw in content_lower for kw in ['chart', 'plot', 'graph', 'visualize', 'visualization']):
+        return {'type': 'visualization'}
     
-    return "text"
+    return {'type': 'text'}
 
 
-def solve_text_task(content: str) -> Any:
-    """Solve a text-based task using LLM"""
-    logger.info("Solving as text task")
+def solve_audio(resources: Dict, content: str) -> Any:
+    """Solve audio transcription tasks"""
+    logger.info("Solving audio task")
     
-    prompt = f"""You are solving a quiz question. Read the following question carefully and provide ONLY the answer.
-
-QUESTION:
-{content}
-
-IMPORTANT INSTRUCTIONS:
-1. Provide ONLY the answer, no explanations
-2. If asked for a command, provide the exact command string
-3. If asked for a number, provide just the number
-4. If asked for text, provide just the text
-5. If asked for JSON, provide valid JSON
-6. Do NOT include any markdown formatting like ```
-7. Do NOT include phrases like "The answer is..."
-
-YOUR ANSWER:"""
-
-    answer = ask_llm(prompt)
-    answer = clean_answer(answer)
+    audio_urls = resources.get('audio', [])
+    if not audio_urls:
+        logger.error("No audio URL found")
+        return None
     
-    logger.info(f"Generated answer: {answer[:200]}...")
-    return answer
+    audio_url = audio_urls[0]
+    logger.info(f"Downloading audio: {audio_url}")
+    
+    audio_path = browser_download(audio_url)
+    transcription = transcribe_audio(audio_path)
+    
+    logger.info(f"Transcription: {transcription}")
+    
+    # For passphrase questions, just return the transcription
+    if 'passphrase' in content.lower() or 'phrase' in content.lower():
+        return transcription.strip().lower()
+    
+    return transcription
 
 
-def solve_file_task(content: str, html: str, base_url: str) -> Any:
-    """Solve a task that requires downloading and processing a file"""
-    logger.info("Solving as file task")
+def solve_image(resources: Dict, content: str, base_url: str) -> Any:
+    """Solve image-related tasks"""
+    logger.info("Solving image task")
     
-    # Extract file URL - now includes .log files
-    file_url = extract_file_url(content, html, base_url)
-    if not file_url:
-        logger.error("Could not find file URL")
-        return solve_text_task(content)
+    image_urls = resources.get('image', [])
+    if not image_urls:
+        return None
     
-    logger.info(f"Found file URL: {file_url}")
+    image_url = image_urls[0]
     
-    # Download the file
-    file_path = download_file(file_url)
-    
-    # Process based on file type
-    if file_url.endswith('.json'):
-        return process_json_file(file_path, content)
-    elif file_url.endswith('.csv'):
-        return process_csv_file(file_path, content)
-    elif file_url.endswith('.pdf'):
-        return process_pdf_file(file_path, content)
-    elif file_url.endswith('.log') or file_url.endswith('.txt'):
-        return process_log_file(file_path, content)
-    elif file_url.endswith('.zip'):
-        return process_zip_file(file_path, content)
-    else:
-        # Read file and let LLM process
-        with open(file_path, 'r', errors='ignore') as f:
-            file_content = f.read()
-        return solve_with_context(content, file_content)
-
-
-def solve_audio_task(content: str, html: str, base_url: str) -> Any:
-    """Solve a task that requires audio transcription"""
-    logger.info("Solving as audio task")
-    
-    # Extract audio URL from HTML - include .opus format
-    audio_patterns = [
-        r'href=["\']([^"\']*\.(?:mp3|wav|ogg|m4a|opus))["\']',
-        r'src=["\']([^"\']*\.(?:mp3|wav|ogg|m4a|opus))["\']',
-        r'(https?://[^\s<>"\']+\.(?:mp3|wav|ogg|m4a|opus))',
-        r'/([^"\'\s<>]+\.(?:mp3|wav|ogg|m4a|opus))',
-    ]
-    
-    audio_url = None
-    for pattern in audio_patterns:
-        match = re.search(pattern, html, re.IGNORECASE)
-        if match:
-            audio_url = match.group(1)
-            if not audio_url.startswith('http'):
-                audio_url = urljoin(base_url + '/', audio_url.lstrip('/'))
-            break
-    
-    if not audio_url:
-        logger.error("Could not find audio URL in HTML")
-        # Try to find it in content
-        for pattern in audio_patterns:
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match:
-                audio_url = match.group(1)
-                if not audio_url.startswith('http'):
-                    audio_url = urljoin(base_url + '/', audio_url.lstrip('/'))
-                break
-    
-    if not audio_url:
-        logger.error("Could not find audio URL anywhere")
-        return solve_text_task(content)
-    
-    logger.info(f"Found audio URL: {audio_url}")
-    
-    try:
-        # Download and transcribe
-        audio_path = download_file(audio_url)
-        transcription = transcribe_audio(audio_path)
-        
-        logger.info(f"Transcription: {transcription}")
-        
-        # For passphrase questions, just return the transcription
-        if 'passphrase' in content.lower() or 'phrase' in content.lower():
-            return transcription.strip()
-        
-        # Use transcription to answer the question
-        prompt = f"""Based on this audio transcription, answer the question.
-
-QUESTION:
-{content}
-
-AUDIO TRANSCRIPTION:
-{transcription}
-
-Provide ONLY the answer (the spoken text/phrase), no explanations."""
-
-        answer = ask_llm(prompt)
-        return clean_answer(answer)
-        
-    except Exception as e:
-        logger.error(f"Audio processing failed: {e}")
-        return solve_text_task(content)
-
-
-def solve_image_task(content: str, html: str, base_url: str) -> Any:
-    """Solve a task that requires image analysis"""
-    logger.info("Solving as image task")
-    
-    # Extract image URL
-    image_patterns = [
-        r'href=["\']([^"\']+\.(?:png|jpg|jpeg|gif))["\']',
-        r'src=["\']([^"\']+\.(?:png|jpg|jpeg|gif))["\']',
-        r'(https?://[^\s<>"\']+\.(?:png|jpg|jpeg|gif))',
-    ]
-    
-    image_url = None
-    for pattern in image_patterns:
-        match = re.search(pattern, html, re.IGNORECASE)
-        if match:
-            image_url = match.group(1)
-            if not image_url.startswith('http'):
-                image_url = urljoin(base_url + '/', image_url.lstrip('/'))
-            break
-    
-    if not image_url:
-        logger.error("Could not find image URL")
-        return solve_text_task(content)
-    
-    logger.info(f"Found image URL: {image_url}")
-    
-    # Check if it's a color-related question (heatmap, dominant color)
+    # Color detection
     if 'color' in content.lower() or 'heatmap' in content.lower():
-        return solve_color_task(image_url, content)
+        logger.info("Detecting dominant color")
+        image_path = browser_download(image_url)
+        return tools.get_dominant_color(image_path)
     
-    # Use vision API for general image questions
-    prompt = f"""Analyze this image carefully and answer the question.
-
-QUESTION:
-{content}
-
-IMPORTANT:
-- Provide ONLY the answer
-- If asked for a color, provide the hex code (e.g., #ff5733)
-- If asked for a number, provide just the number
-- Be precise and specific
-
-YOUR ANSWER:"""
-
-    answer = ask_llm_with_image(prompt, image_url=image_url)
-    return clean_answer(answer)
+    # Generic image analysis
+    return ask_llm_with_image(f"Analyze this image and answer: {content}", image_url=image_url)
 
 
-def solve_color_task(image_url: str, content: str) -> str:
-    """Solve a task that requires finding dominant color in an image"""
-    logger.info("Solving color/heatmap task")
+def solve_api_call(resources: Dict, content: str, email: str) -> Any:
+    """Solve tasks requiring API calls"""
+    logger.info("Solving API task")
     
-    try:
-        from PIL import Image
-        from collections import Counter
-        import io
+    # Check for GitHub API task
+    json_urls = resources.get('json', [])
+    if json_urls and 'github' in content.lower():
+        # Download the params file
+        params_path = browser_download(json_urls[0])
+        params = tools.extract_json_content(params_path)
         
-        # Download image
-        response = requests.get(image_url, timeout=30)
-        img = Image.open(io.BytesIO(response.content))
+        logger.info(f"API params: {params}")
         
-        # Convert to RGB if necessary
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
+        # Build GitHub API call
+        owner = params.get('owner', '')
+        repo = params.get('repo', '')
+        sha = params.get('sha', '')
+        path_prefix = params.get('pathPrefix', '')
         
-        # Get all pixels
-        pixels = list(img.getdata())
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{sha}?recursive=1"
+        response = tools.call_api(api_url, headers={'Accept': 'application/vnd.github.v3+json'})
         
-        # Count colors
-        color_counts = Counter(pixels)
-        
-        # Get most common color
-        most_common = color_counts.most_common(1)[0][0]
-        
-        # Convert to hex
-        hex_color = '#{:02x}{:02x}{:02x}'.format(most_common[0], most_common[1], most_common[2])
-        
-        logger.info(f"Dominant color found: {hex_color}")
-        return hex_color
-        
-    except Exception as e:
-        logger.error(f"Color extraction failed: {e}")
-        # Fallback to vision API
-        prompt = f"""Look at this image and find the dominant/most common color.
-        
-QUESTION: {content}
-
-Return ONLY the hex color code (e.g., #b45a1e). No explanations."""
-        
-        answer = ask_llm_with_image(prompt, image_url=image_url)
-        return clean_answer(answer)
-
-
-def solve_api_task(content: str, html: str, base_url: str) -> Any:
-    """Solve a task that requires API interaction or command generation"""
-    logger.info("Solving as API task")
-    
-    prompt = f"""Analyze this task and provide the exact answer requested.
-
-TASK:
-{content}
-
-INSTRUCTIONS:
-- If asked to "craft a command", provide ONLY the exact command string
-- If asked for a curl/uv command, provide the complete command
-- Replace <your email> with the actual email if mentioned in the task
-- Do NOT include explanations
-
-YOUR ANSWER:"""
-
-    response = ask_llm(prompt)
-    return clean_answer(response)
-
-
-def extract_file_url(content: str, html: str, base_url: str) -> Optional[str]:
-    """Extract file URL from page content - now includes log and zip files"""
-    file_patterns = [
-        r'href=["\']([^"\']+\.(?:pdf|csv|json|xlsx|xls|log|txt|zip))["\']',
-        r'(https?://[^\s<>"\']+\.(?:pdf|csv|json|xlsx|xls|log|txt|zip))',
-    ]
-    
-    for pattern in file_patterns:
-        match = re.search(pattern, html, re.IGNORECASE)
-        if match:
-            url = match.group(1)
-            if not url.startswith('http'):
-                url = urljoin(base_url + '/', url.lstrip('/'))
-            return url
-    
-    return None
-
-
-def process_json_file(file_path: str, question: str) -> Any:
-    """Process a JSON file and answer the question"""
-    with open(file_path, 'r') as f:
-        data = json.load(f)
-    
-    # Convert to string for LLM
-    data_str = json.dumps(data, indent=2)
-    if len(data_str) > 50000:
-        data_str = data_str[:50000] + "...[truncated]"
-    
-    return solve_with_context(question, data_str)
-
-
-def process_csv_file(file_path: str, question: str) -> Any:
-    """Process a CSV file and answer the question"""
-    import pandas as pd
-    
-    try:
-        df = pd.read_csv(file_path)
-    except:
-        # Try with different encoding
-        df = pd.read_csv(file_path, encoding='latin-1')
-    
-    # Provide full data for better analysis
-    full_data = df.to_string()
-    
-    # Also provide stats
-    summary = f"""CSV Data Analysis:
-Shape: {df.shape}
-Columns: {list(df.columns)}
-Data Types: {df.dtypes.to_dict()}
-
-FULL DATA:
-{full_data}
-
-Statistics:
-{df.describe().to_string()}
-"""
-    
-    if len(summary) > 60000:
-        summary = summary[:60000] + "...[truncated]"
-    
-    return solve_with_context(question, summary)
-
-
-def process_pdf_file(file_path: str, question: str) -> Any:
-    """Process a PDF file and answer the question"""
-    import pdfplumber
-    
-    text_content = ""
-    tables_content = ""
-    
-    with pdfplumber.open(file_path) as pdf:
-        for i, page in enumerate(pdf.pages):
-            # Extract text
-            text_content += f"--- Page {i+1} ---\n"
-            text_content += page.extract_text() or ""
-            text_content += "\n\n"
+        if response.get('status') == 200:
+            tree = response.get('json', {}).get('tree', [])
             
-            # Extract tables
-            tables = page.extract_tables()
-            if tables:
-                for j, table in enumerate(tables):
-                    tables_content += f"--- Table {j+1} on Page {i+1} ---\n"
-                    for row in table:
-                        tables_content += " | ".join(str(cell) if cell else "" for cell in row) + "\n"
-                    tables_content += "\n"
+            # Count files matching pattern
+            if '.md' in content.lower():
+                count = sum(1 for item in tree if item.get('path', '').startswith(path_prefix) and item.get('path', '').endswith('.md'))
+                
+                # Add email offset
+                if 'mod 2' in content.lower():
+                    offset = len(email) % 2
+                elif 'mod 5' in content.lower():
+                    offset = len(email) % 5
+                else:
+                    offset = 0
+                
+                logger.info(f"Count: {count}, Offset: {offset}")
+                return count + offset
     
-    # Combine text and tables
-    full_content = f"""PDF TEXT CONTENT:
-{text_content}
+    # Generic API task - let LLM generate the command/answer
+    return solve_with_llm(resources, content, email)
 
-PDF TABLES:
-{tables_content}
-"""
+
+def solve_data_processing(resources: Dict, content: str, email: str) -> Any:
+    """Solve data processing tasks"""
+    logger.info("Solving data processing task")
     
-    if len(full_content) > 60000:
-        full_content = full_content[:60000] + "...[truncated]"
-    
-    # Special handling for invoice/total questions
-    if 'total' in question.lower() or 'sum' in question.lower() or 'invoice' in question.lower():
-        prompt = f"""Analyze this PDF content and calculate the requested total.
-
-QUESTION:
-{question}
-
-PDF CONTENT:
-{full_content}
-
-IMPORTANT:
-- Calculate the exact total from the line items/values shown
-- Return ONLY the number (with 2 decimal places if applicable)
-- Do not include currency symbols
-
-YOUR ANSWER:"""
-        answer = ask_llm(prompt)
-        return clean_answer(answer)
-    
-    return solve_with_context(question, full_content)
-
-
-def process_log_file(file_path: str, question: str) -> Any:
-    """Process a log file and answer the question"""
-    logger.info("Processing log file")
-    
-    with open(file_path, 'r', errors='ignore') as f:
-        log_content = f.read()
-    
-    # Parse log entries
-    log_summary = f"""LOG FILE CONTENT:
-{log_content}
-
-LOG ANALYSIS:
-- Total lines: {len(log_content.splitlines())}
-"""
-    
-    # Special handling for download bytes / sum questions
-    if 'download' in question.lower() or 'bytes' in question.lower() or 'sum' in question.lower():
-        prompt = f"""Analyze this log file and calculate what's requested.
-
-QUESTION:
-{question}
-
-LOG CONTENT:
-{log_content}
-
-IMPORTANT:
-- Parse the log entries carefully
-- Calculate the exact sum/total requested
-- Return ONLY the number
-- If the question mentions adding an offset (like email length mod 5), calculate and include it
-
-YOUR ANSWER:"""
-        answer = ask_llm(prompt)
-        return clean_answer(answer)
-    
-    return solve_with_context(question, log_summary)
-
-
-def process_zip_file(file_path: str, question: str) -> Any:
-    """Process a zip file containing logs and answer the question"""
-    import zipfile
-    import json as json_module
-    
-    logger.info("Processing zip file for logs")
-    
-    all_content = ""
-    
-    try:
-        with zipfile.ZipFile(file_path, 'r') as zip_ref:
-            for file_name in zip_ref.namelist():
-                logger.info(f"Found file in zip: {file_name}")
-                with zip_ref.open(file_name) as f:
-                    content = f.read().decode('utf-8', errors='ignore')
-                    all_content += f"--- {file_name} ---\n{content}\n\n"
+    # PDF Processing
+    if 'pdf' in resources:
+        pdf_url = resources['pdf'][0]
+        pdf_path = browser_download(pdf_url)
+        pdf_data = tools.extract_pdf_content(pdf_path)
         
-        # Special handling for download bytes / sum questions
-        if 'download' in question.lower() or 'bytes' in question.lower():
-            # Try to parse as JSON lines and calculate sum
-            total_bytes = 0
-            lines = all_content.split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('---'):
-                    try:
-                        entry = json_module.loads(line)
-                        if entry.get('event') == 'download' and 'bytes' in entry:
-                            total_bytes += int(entry['bytes'])
-                    except:
-                        pass
-            
-            # Check if we need to add email offset
-            if 'offset' in question.lower() or 'email' in question.lower():
-                # Email length mod 5
-                email = "23f3003663@ds.study.iitm.ac.in"
-                offset = len(email) % 5
-                logger.info(f"Email: {email}, length: {len(email)}, offset: {offset}")
-                total_bytes += offset
-            
-            logger.info(f"Calculated total bytes: {total_bytes}")
-            return total_bytes
+        # Invoice calculation
+        if 'invoice' in content.lower() or 'quantity' in content.lower():
+            return calculate_invoice_total(pdf_data)
         
-        # Fallback to LLM
-        return solve_with_context(question, all_content)
+        # General PDF question
+        return solve_with_context_llm(content, f"PDF Content:\n{pdf_data['text']}\n\nTables: {pdf_data['tables']}", email)
+    
+    # ZIP Processing (logs)
+    if 'zip' in resources:
+        zip_url = resources['zip'][0]
+        zip_path = browser_download(zip_url)
+        zip_data = tools.extract_zip_content(zip_path)
         
-    except Exception as e:
-        logger.error(f"Zip processing error: {e}")
-        return solve_with_context(question, f"Error processing zip: {e}")
+        # Sum bytes where event=="download"
+        if 'bytes' in content.lower() and 'download' in content.lower():
+            return calculate_log_bytes(zip_data, email, content)
+        
+        return solve_with_context_llm(content, f"ZIP Content:\n{json.dumps(zip_data, indent=2)}", email)
+    
+    # CSV Processing
+    if 'csv' in resources:
+        csv_url = resources['csv'][0]
+        csv_path = browser_download(csv_url)
+        csv_data = tools.extract_csv_content(csv_path)
+        
+        # Normalization task
+        if 'normalize' in content.lower() or 'snake_case' in content.lower():
+            return normalize_csv_data(csv_data['data'])
+        
+        return solve_with_context_llm(content, f"CSV Data:\n{json.dumps(csv_data, indent=2)}", email)
+    
+    # JSON Processing
+    if 'json' in resources:
+        json_url = resources['json'][0]
+        json_path = browser_download(json_url)
+        json_data = tools.extract_json_content(json_path)
+        
+        return solve_with_context_llm(content, f"JSON Data:\n{json.dumps(json_data, indent=2)}", email)
+    
+    return solve_with_llm(resources, content, email)
 
 
-def solve_with_context(question: str, context: str) -> Any:
-    """Solve a question with additional context"""
-    prompt = f"""Answer this question based on the provided data.
+def solve_visualization(resources: Dict, content: str) -> Any:
+    """Solve visualization tasks - generate charts as base64"""
+    logger.info("Solving visualization task")
+    
+    # TODO: Implement chart generation based on data
+    # For now, fall back to LLM
+    return solve_with_pure_llm(content, USER_EMAIL)
+
+
+def solve_with_llm(resources: Dict, content: str, email: str) -> Any:
+    """Let LLM solve with knowledge of available resources"""
+    context = f"Available resources: {json.dumps(resources, indent=2)}"
+    return solve_with_context_llm(content, context, email)
+
+
+def solve_with_context_llm(question: str, context: str, email: str) -> Any:
+    """Solve using LLM with provided context"""
+    prompt = f"""You are solving a data analysis quiz. Analyze the data and answer the question.
 
 QUESTION:
 {question}
@@ -593,62 +347,148 @@ QUESTION:
 DATA:
 {context}
 
-IMPORTANT:
+EMAIL (for offset calculations): {email}
+EMAIL LENGTH: {len(email)}
+
+IMPORTANT INSTRUCTIONS:
 1. Provide ONLY the answer, no explanations
-2. For numerical answers, provide just the number (with decimals if needed)
-3. For commands, provide the exact command string
-4. For text answers, provide just the text
-5. For JSON, provide valid JSON
-6. Be precise and accurate
+2. If asked for a number, provide just the number
+3. If asked for a command, provide the exact command string
+4. If asked for JSON, provide valid JSON
+5. If there's an offset calculation (e.g., email length mod X), include it in your answer
+6. For dates, use ISO-8601 format (YYYY-MM-DD)
+7. Do NOT include markdown formatting
 
 YOUR ANSWER:"""
 
     answer = ask_llm(prompt)
-    return clean_answer(answer)
+    return clean_and_validate_answer(answer, question)
 
 
-def clean_answer(answer: str) -> Any:
-    """Clean and parse the answer into appropriate type"""
-    if not answer:
+def solve_with_pure_llm(content: str, email: str) -> Any:
+    """Pure LLM solve when no special processing needed"""
+    prompt = f"""You are solving a quiz question. Read carefully and provide ONLY the answer.
+
+QUESTION:
+{content}
+
+EMAIL (if needed): {email}
+EMAIL LENGTH: {len(email)}
+
+IMPORTANT:
+1. Provide ONLY the answer
+2. No explanations or formatting
+3. For numbers, just the number
+4. For commands, the exact command
+
+YOUR ANSWER:"""
+
+    answer = ask_llm(prompt)
+    return clean_and_validate_answer(answer, content)
+
+
+def calculate_invoice_total(pdf_data: Dict) -> float:
+    """Calculate sum(Quantity * UnitPrice) from PDF tables"""
+    import re
+    
+    total = 0.0
+    
+    for table_info in pdf_data.get('tables', []):
+        table = table_info.get('data', [])
+        if len(table) < 2:
+            continue
+        
+        header = [str(cell).lower().replace(' ', '') if cell else '' for cell in table[0]]
+        
+        qty_idx = price_idx = None
+        for i, col in enumerate(header):
+            if 'quantity' in col or 'qty' in col:
+                qty_idx = i
+            if 'unitprice' in col or 'price' in col:
+                price_idx = i
+        
+        if qty_idx is not None and price_idx is not None:
+            for row in table[1:]:
+                try:
+                    qty = float(re.sub(r'[^\d.]', '', str(row[qty_idx] or '0')))
+                    price = float(re.sub(r'[^\d.]', '', str(row[price_idx] or '0')))
+                    total += qty * price
+                except:
+                    pass
+    
+    return round(total, 2)
+
+
+def calculate_log_bytes(zip_data: Dict, email: str, content: str) -> int:
+    """Calculate sum of bytes where event==download from log files"""
+    import json as json_module
+    
+    total = 0
+    
+    for filename, file_content in zip_data.get('files', {}).items():
+        for line in file_content.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json_module.loads(line)
+                if entry.get('event') == 'download' and 'bytes' in entry:
+                    total += int(entry['bytes'])
+            except:
+                pass
+    
+    # Add offset
+    if 'mod 5' in content.lower():
+        offset = len(email) % 5
+    elif 'mod 2' in content.lower():
+        offset = len(email) % 2
+    else:
+        offset = 0
+    
+    logger.info(f"Log bytes: {total}, offset: {offset}")
+    return total + offset
+
+
+def normalize_csv_data(data: List[Dict]) -> List[Dict]:
+    """Normalize CSV data: snake_case, ISO dates, integers, sorted"""
+    return tools.normalize_to_json(data, sort_by='id')
+
+
+def clean_and_validate_answer(answer: Any, question: str) -> Any:
+    """Clean and validate the answer format"""
+    if answer is None:
         return ""
     
-    # Remove markdown code blocks
-    answer = re.sub(r'```\w*\n?', '', answer)
-    answer = answer.strip()
+    # If already non-string, return as-is
+    if not isinstance(answer, str):
+        return answer
+    
+    # Remove markdown
+    answer = re.sub(r'```\w*\n?', '', answer).strip()
     
     # Remove common prefixes
-    prefixes_to_remove = [
-        "The answer is:",
-        "The answer is",
-        "Answer:",
-        "Answer",
-        "Result:",
-        "Result",
-    ]
-    for prefix in prefixes_to_remove:
+    for prefix in ['The answer is:', 'Answer:', 'Result:']:
         if answer.lower().startswith(prefix.lower()):
             answer = answer[len(prefix):].strip()
     
-    # Try to parse as JSON if it looks like JSON
+    # Try parsing as JSON
     if answer.startswith('{') or answer.startswith('['):
         try:
             return json.loads(answer)
         except:
             pass
     
-    # Try to parse as number
+    # Try parsing as number
     try:
-        # Remove any trailing text after number
-        num_match = re.match(r'^-?[\d,]+\.?\d*', answer.replace(',', ''))
-        if num_match:
-            num_str = num_match.group()
-            if '.' in num_str:
-                return float(num_str)
-            return int(num_str)
+        clean_num = re.sub(r'[^\d.-]', '', answer.split()[0] if answer else '')
+        if clean_num:
+            if '.' in clean_num:
+                return float(clean_num)
+            return int(clean_num)
     except:
         pass
     
-    # Try to parse as boolean
+    # Boolean
     if answer.lower() in ['true', 'yes']:
         return True
     if answer.lower() in ['false', 'no']:

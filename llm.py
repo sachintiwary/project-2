@@ -107,19 +107,37 @@ def transcribe_audio(audio_path: str) -> str:
     try:
         logger.info(f"Transcribing audio: {audio_path}")
         
+        # Convert opus/ogg to mp3 if needed (API only supports wav/mp3)
+        ext = os.path.splitext(audio_path)[1].lower()
+        if ext in ['.opus', '.ogg', '.m4a']:
+            logger.info(f"Converting {ext} to mp3...")
+            try:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(audio_path)
+                mp3_path = audio_path.replace(ext, '.mp3')
+                audio.export(mp3_path, format='mp3')
+                audio_path = mp3_path
+                logger.info(f"Converted to: {audio_path}")
+            except Exception as conv_err:
+                logger.error(f"Audio conversion failed: {conv_err}")
+                # Try subprocess as fallback
+                import subprocess
+                mp3_path = audio_path.replace(ext, '.mp3')
+                result = subprocess.run(['ffmpeg', '-i', audio_path, '-y', mp3_path], 
+                                       capture_output=True, timeout=30)
+                if result.returncode == 0:
+                    audio_path = mp3_path
+                    logger.info(f"Converted with ffmpeg to: {audio_path}")
+                else:
+                    raise Exception(f"FFmpeg failed: {result.stderr.decode()}")
+        
         # Read and encode audio as base64
         with open(audio_path, "rb") as audio_file:
             audio_data = base64.b64encode(audio_file.read()).decode('utf-8')
         
         # Determine audio format from extension
         ext = os.path.splitext(audio_path)[1].lower()
-        audio_format = {
-            '.opus': 'opus',
-            '.mp3': 'mp3',
-            '.wav': 'wav',
-            '.ogg': 'ogg',
-            '.m4a': 'm4a',
-        }.get(ext, 'opus')
+        audio_format = 'mp3' if ext == '.mp3' else 'wav'
         
         logger.info(f"Audio format: {audio_format}, base64 length: {len(audio_data)}")
         
