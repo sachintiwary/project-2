@@ -5,7 +5,9 @@ Coordinates page rendering, task detection, solving, and submission
 import re
 import json
 import logging
+import requests
 from typing import Any, Optional
+from urllib.parse import urljoin
 
 from browser import render_page, download_file
 from llm import ask_llm, ask_llm_with_image, transcribe_audio
@@ -17,11 +19,6 @@ logger = logging.getLogger(__name__)
 def solve_quiz(email: str, secret: str, url: str):
     """
     Main entry point - solve a quiz and handle the chain of questions
-    
-    Args:
-        email: Student email
-        secret: Student secret
-        url: Initial quiz URL
     """
     current_url = url
     max_questions = 20  # Safety limit
@@ -78,12 +75,6 @@ def solve_quiz(email: str, secret: str, url: str):
 def solve_question(page_data: dict) -> Any:
     """
     Analyze the question and generate an answer
-    
-    Args:
-        page_data: Dict with content, html, submit_url, etc.
-    
-    Returns:
-        The answer in appropriate format
     """
     content = page_data["content"]
     html = page_data["html"]
@@ -92,15 +83,15 @@ def solve_question(page_data: dict) -> Any:
     logger.info("Analyzing question...")
     
     # Detect task type and solve accordingly
-    task_type = detect_task_type(content)
+    task_type = detect_task_type(content, html)
     logger.info(f"Detected task type: {task_type}")
     
-    if task_type == "file_download":
-        return solve_file_task(content, html, base_url)
-    elif task_type == "audio":
+    if task_type == "audio":
         return solve_audio_task(content, html, base_url)
     elif task_type == "image":
         return solve_image_task(content, html, base_url)
+    elif task_type == "file_download":
+        return solve_file_task(content, html, base_url)
     elif task_type == "api":
         return solve_api_task(content, html, base_url)
     else:
@@ -108,24 +99,35 @@ def solve_question(page_data: dict) -> Any:
         return solve_text_task(content)
 
 
-def detect_task_type(content: str) -> str:
-    """Detect the type of task from page content"""
+def detect_task_type(content: str, html: str) -> str:
+    """Detect the type of task from page content AND html"""
     content_lower = content.lower()
+    html_lower = html.lower()
     
-    # Check for file downloads
-    if re.search(r'\.(pdf|csv|json|xlsx|xls)\b', content_lower):
-        return "file_download"
-    
-    # Check for audio
-    if re.search(r'\.(mp3|wav|ogg|m4a|audio)\b', content_lower):
+    # Check for audio FIRST (priority) - check both content and HTML
+    audio_keywords = ['transcribe', 'audio', 'listen', 'spoken', 'passphrase', 'speech']
+    if any(kw in content_lower for kw in audio_keywords):
+        return "audio"
+    if re.search(r'\.(mp3|wav|ogg|m4a)\b', html_lower):
         return "audio"
     
     # Check for image tasks
-    if re.search(r'\.(png|jpg|jpeg|gif|image)\b', content_lower):
+    image_keywords = ['heatmap', 'dominant color', 'image', 'chart', 'graph', 'picture']
+    if any(kw in content_lower for kw in image_keywords):
         return "image"
+    if re.search(r'\.(png|jpg|jpeg|gif)\b', content_lower):
+        return "image"
+    
+    # Check for file downloads (log files too!)
+    if re.search(r'\.(pdf|csv|json|xlsx|xls|log|txt)\b', html_lower):
+        return "file_download"
     
     # Check for API tasks
     if 'api' in content_lower and ('curl' in content_lower or 'endpoint' in content_lower):
+        return "api"
+    
+    # Check for uv command tasks
+    if 'uv' in content_lower and ('command' in content_lower or 'http' in content_lower):
         return "api"
     
     return "text"
@@ -162,7 +164,7 @@ def solve_file_task(content: str, html: str, base_url: str) -> Any:
     """Solve a task that requires downloading and processing a file"""
     logger.info("Solving as file task")
     
-    # Extract file URL
+    # Extract file URL - now includes .log files
     file_url = extract_file_url(content, html, base_url)
     if not file_url:
         logger.error("Could not find file URL")
@@ -180,6 +182,8 @@ def solve_file_task(content: str, html: str, base_url: str) -> Any:
         return process_csv_file(file_path, content)
     elif file_url.endswith('.pdf'):
         return process_pdf_file(file_path, content)
+    elif file_url.endswith('.log') or file_url.endswith('.txt'):
+        return process_log_file(file_path, content)
     else:
         # Read file and let LLM process
         with open(file_path, 'r', errors='ignore') as f:
@@ -191,11 +195,12 @@ def solve_audio_task(content: str, html: str, base_url: str) -> Any:
     """Solve a task that requires audio transcription"""
     logger.info("Solving as audio task")
     
-    # Extract audio URL
+    # Extract audio URL from HTML
     audio_patterns = [
-        r'href=["\']([^"\']+\.(?:mp3|wav|ogg|m4a))["\']',
-        r'src=["\']([^"\']+\.(?:mp3|wav|ogg|m4a))["\']',
+        r'href=["\']([^"\']*\.(?:mp3|wav|ogg|m4a))["\']',
+        r'src=["\']([^"\']*\.(?:mp3|wav|ogg|m4a))["\']',
         r'(https?://[^\s<>"\']+\.(?:mp3|wav|ogg|m4a))',
+        r'/([^"\'\s<>]+\.(?:mp3|wav|ogg|m4a))',
     ]
     
     audio_url = None
@@ -204,21 +209,39 @@ def solve_audio_task(content: str, html: str, base_url: str) -> Any:
         if match:
             audio_url = match.group(1)
             if not audio_url.startswith('http'):
-                audio_url = base_url + '/' + audio_url.lstrip('/')
+                audio_url = urljoin(base_url + '/', audio_url.lstrip('/'))
             break
     
     if not audio_url:
-        logger.error("Could not find audio URL")
+        logger.error("Could not find audio URL in HTML")
+        # Try to find it in content
+        for pattern in audio_patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                audio_url = match.group(1)
+                if not audio_url.startswith('http'):
+                    audio_url = urljoin(base_url + '/', audio_url.lstrip('/'))
+                break
+    
+    if not audio_url:
+        logger.error("Could not find audio URL anywhere")
         return solve_text_task(content)
     
     logger.info(f"Found audio URL: {audio_url}")
     
-    # Download and transcribe
-    audio_path = download_file(audio_url)
-    transcription = transcribe_audio(audio_path)
-    
-    # Use transcription to answer the question
-    prompt = f"""Based on this audio transcription, answer the question.
+    try:
+        # Download and transcribe
+        audio_path = download_file(audio_url)
+        transcription = transcribe_audio(audio_path)
+        
+        logger.info(f"Transcription: {transcription}")
+        
+        # For passphrase questions, just return the transcription
+        if 'passphrase' in content.lower() or 'phrase' in content.lower():
+            return transcription.strip()
+        
+        # Use transcription to answer the question
+        prompt = f"""Based on this audio transcription, answer the question.
 
 QUESTION:
 {content}
@@ -226,10 +249,14 @@ QUESTION:
 AUDIO TRANSCRIPTION:
 {transcription}
 
-Provide ONLY the answer, no explanations."""
+Provide ONLY the answer (the spoken text/phrase), no explanations."""
 
-    answer = ask_llm(prompt)
-    return clean_answer(answer)
+        answer = ask_llm(prompt)
+        return clean_answer(answer)
+        
+    except Exception as e:
+        logger.error(f"Audio processing failed: {e}")
+        return solve_text_task(content)
 
 
 def solve_image_task(content: str, html: str, base_url: str) -> Any:
@@ -249,7 +276,7 @@ def solve_image_task(content: str, html: str, base_url: str) -> Any:
         if match:
             image_url = match.group(1)
             if not image_url.startswith('http'):
-                image_url = base_url + '/' + image_url.lstrip('/')
+                image_url = urljoin(base_url + '/', image_url.lstrip('/'))
             break
     
     if not image_url:
@@ -258,44 +285,99 @@ def solve_image_task(content: str, html: str, base_url: str) -> Any:
     
     logger.info(f"Found image URL: {image_url}")
     
-    # Use vision API
-    answer = ask_llm_with_image(
-        f"Answer this question based on the image:\n\n{content}\n\nProvide ONLY the answer.",
-        image_url=image_url
-    )
+    # Check if it's a color-related question (heatmap, dominant color)
+    if 'color' in content.lower() or 'heatmap' in content.lower():
+        return solve_color_task(image_url, content)
+    
+    # Use vision API for general image questions
+    prompt = f"""Analyze this image carefully and answer the question.
+
+QUESTION:
+{content}
+
+IMPORTANT:
+- Provide ONLY the answer
+- If asked for a color, provide the hex code (e.g., #ff5733)
+- If asked for a number, provide just the number
+- Be precise and specific
+
+YOUR ANSWER:"""
+
+    answer = ask_llm_with_image(prompt, image_url=image_url)
     return clean_answer(answer)
 
 
+def solve_color_task(image_url: str, content: str) -> str:
+    """Solve a task that requires finding dominant color in an image"""
+    logger.info("Solving color/heatmap task")
+    
+    try:
+        from PIL import Image
+        from collections import Counter
+        import io
+        
+        # Download image
+        response = requests.get(image_url, timeout=30)
+        img = Image.open(io.BytesIO(response.content))
+        
+        # Convert to RGB if necessary
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Get all pixels
+        pixels = list(img.getdata())
+        
+        # Count colors
+        color_counts = Counter(pixels)
+        
+        # Get most common color
+        most_common = color_counts.most_common(1)[0][0]
+        
+        # Convert to hex
+        hex_color = '#{:02x}{:02x}{:02x}'.format(most_common[0], most_common[1], most_common[2])
+        
+        logger.info(f"Dominant color found: {hex_color}")
+        return hex_color
+        
+    except Exception as e:
+        logger.error(f"Color extraction failed: {e}")
+        # Fallback to vision API
+        prompt = f"""Look at this image and find the dominant/most common color.
+        
+QUESTION: {content}
+
+Return ONLY the hex color code (e.g., #b45a1e). No explanations."""
+        
+        answer = ask_llm_with_image(prompt, image_url=image_url)
+        return clean_answer(answer)
+
+
 def solve_api_task(content: str, html: str, base_url: str) -> Any:
-    """Solve a task that requires API interaction"""
+    """Solve a task that requires API interaction or command generation"""
     logger.info("Solving as API task")
     
-    # Let LLM analyze what API call to make
-    prompt = f"""Analyze this task and tell me what curl command or API request to make.
+    prompt = f"""Analyze this task and provide the exact answer requested.
 
 TASK:
 {content}
 
-If the task asks you to construct a curl command, provide ONLY the exact command.
-If the task asks for the result of an API call, I'll help you make the call.
+INSTRUCTIONS:
+- If asked to "craft a command", provide ONLY the exact command string
+- If asked for a curl/uv command, provide the complete command
+- Replace <your email> with the actual email if mentioned in the task
+- Do NOT include explanations
 
-YOUR RESPONSE:"""
+YOUR ANSWER:"""
 
     response = ask_llm(prompt)
-    
-    # Check if it's asking for a command string vs actual API call
-    if 'curl' in content.lower() and 'command' in content.lower():
-        # They want the command string, not the result
-        return clean_answer(response)
-    
     return clean_answer(response)
 
 
 def extract_file_url(content: str, html: str, base_url: str) -> Optional[str]:
-    """Extract file URL from page content"""
+    """Extract file URL from page content - now includes log files"""
     file_patterns = [
-        r'href=["\']([^"\']+\.(?:pdf|csv|json|xlsx|xls))["\']',
-        r'(https?://[^\s<>"\']+\.(?:pdf|csv|json|xlsx|xls))',
+        r'href=["\']([^"\']+\.(?:pdf|csv|json|xlsx|xls|log|txt))["\']',
+        r'(https?://[^\s<>"\']+\.(?:pdf|csv|json|xlsx|xls|log|txt))',
     ]
     
     for pattern in file_patterns:
@@ -303,7 +385,7 @@ def extract_file_url(content: str, html: str, base_url: str) -> Optional[str]:
         if match:
             url = match.group(1)
             if not url.startswith('http'):
-                url = base_url + '/' + url.lstrip('/')
+                url = urljoin(base_url + '/', url.lstrip('/'))
             return url
     
     return None
@@ -326,13 +408,30 @@ def process_csv_file(file_path: str, question: str) -> Any:
     """Process a CSV file and answer the question"""
     import pandas as pd
     
-    df = pd.read_csv(file_path)
+    try:
+        df = pd.read_csv(file_path)
+    except:
+        # Try with different encoding
+        df = pd.read_csv(file_path, encoding='latin-1')
     
-    # Get summary and first/last rows
-    summary = f"Shape: {df.shape}\nColumns: {list(df.columns)}\n\nFirst 10 rows:\n{df.head(10).to_string()}\n\nLast 5 rows:\n{df.tail(5).to_string()}"
+    # Provide full data for better analysis
+    full_data = df.to_string()
     
-    if len(summary) > 50000:
-        summary = summary[:50000] + "...[truncated]"
+    # Also provide stats
+    summary = f"""CSV Data Analysis:
+Shape: {df.shape}
+Columns: {list(df.columns)}
+Data Types: {df.dtypes.to_dict()}
+
+FULL DATA:
+{full_data}
+
+Statistics:
+{df.describe().to_string()}
+"""
+    
+    if len(summary) > 60000:
+        summary = summary[:60000] + "...[truncated]"
     
     return solve_with_context(question, summary)
 
@@ -342,15 +441,93 @@ def process_pdf_file(file_path: str, question: str) -> Any:
     import pdfplumber
     
     text_content = ""
+    tables_content = ""
+    
     with pdfplumber.open(file_path) as pdf:
-        for page in pdf.pages:
+        for i, page in enumerate(pdf.pages):
+            # Extract text
+            text_content += f"--- Page {i+1} ---\n"
             text_content += page.extract_text() or ""
             text_content += "\n\n"
+            
+            # Extract tables
+            tables = page.extract_tables()
+            if tables:
+                for j, table in enumerate(tables):
+                    tables_content += f"--- Table {j+1} on Page {i+1} ---\n"
+                    for row in table:
+                        tables_content += " | ".join(str(cell) if cell else "" for cell in row) + "\n"
+                    tables_content += "\n"
     
-    if len(text_content) > 50000:
-        text_content = text_content[:50000] + "...[truncated]"
+    # Combine text and tables
+    full_content = f"""PDF TEXT CONTENT:
+{text_content}
+
+PDF TABLES:
+{tables_content}
+"""
     
-    return solve_with_context(question, text_content)
+    if len(full_content) > 60000:
+        full_content = full_content[:60000] + "...[truncated]"
+    
+    # Special handling for invoice/total questions
+    if 'total' in question.lower() or 'sum' in question.lower() or 'invoice' in question.lower():
+        prompt = f"""Analyze this PDF content and calculate the requested total.
+
+QUESTION:
+{question}
+
+PDF CONTENT:
+{full_content}
+
+IMPORTANT:
+- Calculate the exact total from the line items/values shown
+- Return ONLY the number (with 2 decimal places if applicable)
+- Do not include currency symbols
+
+YOUR ANSWER:"""
+        answer = ask_llm(prompt)
+        return clean_answer(answer)
+    
+    return solve_with_context(question, full_content)
+
+
+def process_log_file(file_path: str, question: str) -> Any:
+    """Process a log file and answer the question"""
+    logger.info("Processing log file")
+    
+    with open(file_path, 'r', errors='ignore') as f:
+        log_content = f.read()
+    
+    # Parse log entries
+    log_summary = f"""LOG FILE CONTENT:
+{log_content}
+
+LOG ANALYSIS:
+- Total lines: {len(log_content.splitlines())}
+"""
+    
+    # Special handling for download bytes / sum questions
+    if 'download' in question.lower() or 'bytes' in question.lower() or 'sum' in question.lower():
+        prompt = f"""Analyze this log file and calculate what's requested.
+
+QUESTION:
+{question}
+
+LOG CONTENT:
+{log_content}
+
+IMPORTANT:
+- Parse the log entries carefully
+- Calculate the exact sum/total requested
+- Return ONLY the number
+- If the question mentions adding an offset (like email length mod 5), calculate and include it
+
+YOUR ANSWER:"""
+        answer = ask_llm(prompt)
+        return clean_answer(answer)
+    
+    return solve_with_context(question, log_summary)
 
 
 def solve_with_context(question: str, context: str) -> Any:
@@ -365,9 +542,11 @@ DATA:
 
 IMPORTANT:
 1. Provide ONLY the answer, no explanations
-2. For numerical answers, provide just the number
+2. For numerical answers, provide just the number (with decimals if needed)
 3. For commands, provide the exact command string
 4. For text answers, provide just the text
+5. For JSON, provide valid JSON
+6. Be precise and accurate
 
 YOUR ANSWER:"""
 
@@ -406,9 +585,13 @@ def clean_answer(answer: str) -> Any:
     
     # Try to parse as number
     try:
-        if '.' in answer:
-            return float(answer)
-        return int(answer)
+        # Remove any trailing text after number
+        num_match = re.match(r'^-?[\d,]+\.?\d*', answer.replace(',', ''))
+        if num_match:
+            num_str = num_match.group()
+            if '.' in num_str:
+                return float(num_str)
+            return int(num_str)
     except:
         pass
     
