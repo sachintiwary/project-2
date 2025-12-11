@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Secrets (NEVER commit these!)
+.env.local
+secrets.txt
+
+# Temp files
+*.tmp
+*.log
+downloads/
+
+# OS files
+.DS_Store
+Thumbs.db

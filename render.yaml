@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: tds-quiz-solver
+    runtime: docker
+    plan: free
+    envVars:
+      - key: MY_SECRET
+        sync: false
+      - key: AIPIPE_TOKEN
+        sync: false
+      - key: LLM_MODEL
+        value: gpt-4o
+    healthCheckPath: /health

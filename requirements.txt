@@ -1,19 +1,26 @@
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-python-multipart==0.0.6
-playwright==1.48.0
+# LLM Quiz Solver Dependencies
+
+# Web Framework
+flask==3.0.0
+gunicorn==21.2.0
+
+# LLM API Client
+openai==1.6.0
+
+# Browser Automation
+playwright==1.40.0
+
+# Data Processing
+pandas==2.1.4
+pdfplumber==0.10.3
+
+# Audio Processing
+SpeechRecognition==3.10.0
+pydub==0.25.1
+
+# Image Processing
+Pillow==10.1.0
+
+# HTTP Client
 requests==2.31.0
-google-generativeai>=0.8.3
-pandas==2.2.0
-numpy==1.26.3
-openpyxl==3.1.2
-lxml==5.1.0
-pypdf==4.0.1
-tabulate==0.9.0
-markdownify==0.11.6
-httpx==0.26.0
-# Additions for Project Requirements:
-matplotlib==3.8.2
-seaborn==0.13.2
-scikit-learn==1.4.0
-scipy==1.12.0
+httpx==0.25.2
