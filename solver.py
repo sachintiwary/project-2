@@ -471,6 +471,10 @@ def clean_and_validate_answer(answer: Any, question: str) -> Any:
         if answer.lower().startswith(prefix.lower()):
             answer = answer[len(prefix):].strip()
     
+    # Preserve hex color codes (like #b45a1e)
+    if re.match(r'^#[0-9a-fA-F]{6}$', answer):
+        return answer.lower()
+    
     # Try parsing as JSON
     if answer.startswith('{') or answer.startswith('['):
         try:
@@ -478,15 +482,15 @@ def clean_and_validate_answer(answer: Any, question: str) -> Any:
         except:
             pass
     
-    # Try parsing as number
-    try:
-        clean_num = re.sub(r'[^\d.-]', '', answer.split()[0] if answer else '')
-        if clean_num:
+    # Try parsing as number (but only if it looks like a pure number)
+    if re.match(r'^-?[\d,]+\.?\d*$', answer.strip()):
+        try:
+            clean_num = answer.strip().replace(',', '')
             if '.' in clean_num:
                 return float(clean_num)
             return int(clean_num)
-    except:
-        pass
+        except:
+            pass
     
     # Boolean
     if answer.lower() in ['true', 'yes']:
@@ -495,3 +499,4 @@ def clean_and_validate_answer(answer: Any, question: str) -> Any:
         return False
     
     return answer
+
