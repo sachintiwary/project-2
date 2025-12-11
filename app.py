@@ -1,15 +1,12 @@
 """
-LLM Quiz Solver - Main Flask Application
-Receives quiz tasks and solves them using LLM + Playwright
+Flask API for LLM Quiz Solver Agent
 """
-import os
-import json
 import logging
 import threading
 from flask import Flask, request, jsonify
 
 from config import MY_SECRET
-from solver import solve_quiz
+from agent import solve_quiz
 
 # Configure logging
 logging.basicConfig(
@@ -23,89 +20,63 @@ app = Flask(__name__)
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint for Render"""
-    return jsonify({"status": "healthy"}), 200
+    """Health check endpoint"""
+    return jsonify({"status": "healthy", "agent": "ready"})
 
 
 @app.route('/', methods=['GET'])
 def home():
-    """Home endpoint"""
+    """Home page"""
     return jsonify({
-        "service": "LLM Quiz Solver",
-        "status": "running",
+        "name": "LLM Quiz Solver Agent",
+        "version": "2.0",
+        "model": "gpt-4o-mini", 
+        "architecture": "ReAct with Tool Calling",
         "endpoints": {
-            "POST /solve": "Submit a quiz task",
-            "GET /health": "Health check"
+            "/": "This page",
+            "/health": "Health check",
+            "/solve": "POST - Solve quiz"
         }
-    }), 200
+    })
 
 
 @app.route('/solve', methods=['POST'])
 def solve():
-    """
-    Main endpoint to receive quiz tasks
-    
-    Expected payload:
-    {
-        "email": "student@example.com",
-        "secret": "your-secret",
-        "url": "https://example.com/quiz-123"
-    }
-    """
-    # Validate JSON
+    """Solve a quiz - POST with {email, secret, url}"""
     try:
         data = request.get_json()
+        
         if not data:
-            logger.warning("Invalid JSON received")
-            return jsonify({"error": "Invalid JSON"}), 400
+            return jsonify({"error": "Expected JSON body"}), 400
+        
+        email = data.get('email')
+        secret = data.get('secret')
+        url = data.get('url')
+        
+        if not all([email, secret, url]):
+            return jsonify({"error": "Missing required fields: email, secret, url"}), 400
+        
+        # Verify secret
+        if secret != MY_SECRET:
+            logger.warning(f"Invalid secret from {email}")
+            return jsonify({"error": "Invalid secret"}), 403
+        
+        logger.info(f"Valid request from {email} for URL: {url}")
+        
+        # Start solving in background
+        thread = threading.Thread(target=solve_quiz, args=(email, secret, url))
+        thread.start()
+        
+        return jsonify({
+            "status": "processing",
+            "message": "Quiz solving started",
+            "url": url
+        })
+        
     except Exception as e:
-        logger.error(f"JSON parse error: {e}")
-        return jsonify({"error": "Invalid JSON"}), 400
-    
-    # Extract fields
-    email = data.get('email')
-    secret = data.get('secret')
-    url = data.get('url')
-    
-    # Validate required fields
-    if not all([email, secret, url]):
-        logger.warning(f"Missing required fields. Got: email={bool(email)}, secret={bool(secret)}, url={bool(url)}")
-        return jsonify({"error": "Missing required fields"}), 400
-    
-    # Verify secret
-    if secret != MY_SECRET:
-        logger.warning(f"Invalid secret from {email}")
-        return jsonify({"error": "Invalid secret"}), 403
-    
-    logger.info(f"Valid request from {email} for URL: {url}")
-    
-    # Start solving in background thread (non-blocking response)
-    thread = threading.Thread(
-        target=solve_quiz_background,
-        args=(email, secret, url)
-    )
-    thread.daemon = True
-    thread.start()
-    
-    # Return 200 immediately as required
-    return jsonify({
-        "status": "processing",
-        "message": "Quiz solving started",
-        "url": url
-    }), 200
-
-
-def solve_quiz_background(email: str, secret: str, url: str):
-    """Background task to solve the quiz"""
-    try:
-        logger.info(f"Starting to solve quiz: {url}")
-        solve_quiz(email, secret, url)
-        logger.info(f"Completed solving quiz: {url}")
-    except Exception as e:
-        logger.error(f"Error solving quiz {url}: {e}", exc_info=True)
+        logger.error(f"Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
-    logger.info(f"Starting LLM Quiz Solver on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
