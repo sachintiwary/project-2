@@ -4,6 +4,7 @@ LLM Integration via AI Pipe (OpenAI-compatible API)
 import os
 import base64
 import logging
+import requests
 from openai import OpenAI
 
 from config import AIPIPE_TOKEN, OPENAI_BASE_URL, LLM_MODEL
@@ -96,11 +97,9 @@ def ask_llm_with_image(prompt: str, image_url: str = None, image_base64: str = N
 
 def transcribe_audio(audio_path: str) -> str:
     """
-    Transcribe audio file using Whisper API via AI Pipe
-    Uses direct HTTP request for better compatibility
+    Transcribe audio file using gpt-4o-audio-preview via chat completions.
+    AI Pipe supports audio in chat messages.
     """
-    import requests
-    
     api_key = AIPIPE_TOKEN or os.getenv("AIPIPE_TOKEN")
     if not api_key:
         raise ValueError("AIPIPE_TOKEN not set")
@@ -108,34 +107,66 @@ def transcribe_audio(audio_path: str) -> str:
     try:
         logger.info(f"Transcribing audio: {audio_path}")
         
-        # Use direct HTTP request to AI Pipe
-        url = "https://aipipe.org/openai/v1/audio/transcriptions"
-        
+        # Read and encode audio as base64
         with open(audio_path, "rb") as audio_file:
-            files = {
-                'file': (os.path.basename(audio_path), audio_file, 'audio/ogg'),
-            }
-            data = {
-                'model': 'gpt-4o-transcribe',
-            }
-            headers = {
-                'Authorization': f'Bearer {api_key}',
-            }
-            
-            response = requests.post(url, files=files, data=data, headers=headers, timeout=60)
-            
-        logger.info(f"Transcription response status: {response.status_code}")
+            audio_data = base64.b64encode(audio_file.read()).decode('utf-8')
+        
+        # Determine audio format from extension
+        ext = os.path.splitext(audio_path)[1].lower()
+        audio_format = {
+            '.opus': 'opus',
+            '.mp3': 'mp3',
+            '.wav': 'wav',
+            '.ogg': 'ogg',
+            '.m4a': 'm4a',
+        }.get(ext, 'opus')
+        
+        logger.info(f"Audio format: {audio_format}, base64 length: {len(audio_data)}")
+        
+        # Use chat completions with audio input
+        url = "https://aipipe.org/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Try using gpt-4o-audio-preview with audio input
+        payload = {
+            "model": "gpt-4o-audio-preview",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": audio_data,
+                                "format": audio_format
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "Transcribe this audio exactly. Return only the spoken text, nothing else."
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 500
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        
+        logger.info(f"Audio chat response status: {response.status_code}")
         
         if response.status_code == 200:
             result = response.json()
-            text = result.get('text', '')
+            text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
             logger.info(f"Transcription complete: {text}")
-            return text
+            return text.strip()
         else:
-            logger.error(f"Transcription failed: {response.text}")
-            raise Exception(f"Transcription API error: {response.status_code} - {response.text}")
+            logger.error(f"Audio chat failed: {response.text}")
+            raise Exception(f"Audio API error: {response.status_code} - {response.text}")
         
     except Exception as e:
         logger.error(f"Audio transcription error: {e}")
         raise
-
