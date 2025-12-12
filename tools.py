@@ -307,11 +307,12 @@ def get_image_dominant_color(url: str) -> str:
 
 
 def transcribe_audio(url: str) -> str:
-    """Transcribe audio file using whisper-1 via AI Pipe (model in query param)"""
+    """Transcribe audio file using Gemini 2.5 Flash via AI Pipe proxy"""
     try:
-        from config import AIPIPE_TOKEN
+        from config import GEMINI_API_KEY
+        import base64
         
-        logger.info(f"Transcribing: {url}")
+        logger.info(f"Transcribing with Gemini: {url}")
         
         # Download audio
         resp = requests.get(url, timeout=60)
@@ -321,7 +322,7 @@ def transcribe_audio(url: str) -> str:
             f.write(resp.content)
             audio_path = f.name
         
-        # Convert to mp3 if needed
+        # Convert to mp3 if needed for better compatibility
         if ext in ['.opus', '.ogg', '.m4a', '.webm']:
             try:
                 from pydub import AudioSegment
@@ -329,26 +330,57 @@ def transcribe_audio(url: str) -> str:
                 mp3_path = audio_path.replace(ext, '.mp3')
                 audio.export(mp3_path, format='mp3')
                 audio_path = mp3_path
+                ext = '.mp3'
                 logger.info(f"Converted to: {mp3_path}")
             except Exception as e:
                 logger.warning(f"Audio conversion failed: {e}")
         
-        # AI Pipe wants model in URL query param, not in multipart body
-        api_url = "https://aipipe.org/openai/v1/audio/transcriptions?model=whisper-1"
+        # Read and encode audio as base64
+        with open(audio_path, 'rb') as f:
+            audio_data = base64.standard_b64encode(f.read()).decode('utf-8')
         
-        with open(audio_path, 'rb') as audio_file:
-            files = {'file': (os.path.basename(audio_path), audio_file, 'audio/mpeg')}
-            headers = {'Authorization': f'Bearer {AIPIPE_TOKEN}'}
-            
-            response = requests.post(api_url, files=files, headers=headers, timeout=120)
+        # Determine MIME type
+        mime_types = {
+            '.mp3': 'audio/mpeg',
+            '.wav': 'audio/wav',
+            '.ogg': 'audio/ogg',
+            '.opus': 'audio/opus',
+            '.m4a': 'audio/mp4',
+        }
+        mime_type = mime_types.get(ext, 'audio/mpeg')
         
-        logger.info(f"Audio response: {response.status_code}")
+        # Use Gemini 2.5 Flash via AI Pipe proxy
+        api_url = "https://aipipe.org/gemini/v1beta/models/gemini-2.5-flash:generateContent"
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {GEMINI_API_KEY}'
+        }
+        
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": "Transcribe this audio exactly. Only output the spoken words, nothing else."},
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": audio_data
+                        }
+                    }
+                ]
+            }]
+        }
+        
+        response = requests.post(api_url, json=payload, headers=headers, timeout=120)
+        
+        logger.info(f"Gemini response: {response.status_code}")
         
         if response.status_code == 200:
             result = response.json()
-            text = result.get('text', '')
+            # Extract text from Gemini response
+            text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
             logger.info(f"Transcription: {text}")
-            return text
+            return text.strip()
         else:
             logger.error(f"Transcription error: {response.text}")
             return f"Error: {response.status_code} - {response.text}"
