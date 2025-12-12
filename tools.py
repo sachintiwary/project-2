@@ -293,7 +293,7 @@ def get_image_dominant_color(url: str) -> str:
 
 
 def transcribe_audio(url: str) -> str:
-    """Transcribe audio file using whisper-1 via AI Pipe"""
+    """Transcribe audio file using gpt-4o-transcribe via AI Pipe (forcing model field first)"""
     try:
         from config import AIPIPE_TOKEN
         
@@ -319,19 +319,24 @@ def transcribe_audio(url: str) -> str:
             except Exception as e:
                 logger.warning(f"Audio conversion failed: {e}")
         
-        # Use whisper-1 via direct API call
+        # Use direct API call but ensure 'model' comes BEFORE 'file'
+        # Some proxies stream parsing and need metadata first
         api_url = "https://aipipe.org/openai/v1/audio/transcriptions"
         
         with open(audio_path, 'rb') as audio_file:
-            # Files: only the audio file
-            files = {'file': (os.path.basename(audio_path), audio_file, 'audio/mpeg')}
-            # Data: model as form field
-            data = {'model': 'whisper-1'}
+            # Construct multipart body manually to ensure order
+            # Requests 'files' param usually handles this, but a list of tuples guarantees order
+            files_usage = [
+                ('model', (None, 'gpt-4o-transcribe')),
+                ('file', (os.path.basename(audio_path), audio_file, 'audio/mpeg'))
+            ]
+            
             headers = {'Authorization': f'Bearer {AIPIPE_TOKEN}'}
             
-            response = requests.post(api_url, files=files, data=data, headers=headers, timeout=120)
+            # Note: passing 'files' as a list of tuples preserves order
+            response = requests.post(api_url, files=files_usage, headers=headers, timeout=120)
         
-        logger.info(f"Whisper response: {response.status_code}")
+        logger.info(f"Audio response: {response.status_code}")
         
         if response.status_code == 200:
             result = response.json()
