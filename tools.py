@@ -113,21 +113,6 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "calculate_with_email_offset",
-            "description": "Calculate a value with email-based offset. offset = (email_length mod divisor)",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "base_value": {"type": "number", "description": "The base value before offset"},
-                    "divisor": {"type": "integer", "description": "The mod divisor (e.g., 2 or 5)"}
-                },
-                "required": ["base_value", "divisor"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "normalize_csv_to_json",
             "description": "Normalize messy CSV: snake_case keys, ISO dates (YYYY-MM-DD), integer values, sorted by id. OUTPUT FORMAT: JSON array like [{id:1,...}]. Submit this array directly - NO wrapper object!",
             "parameters": {
@@ -664,7 +649,6 @@ TOOL_FUNCTIONS = {
     "transcribe_audio": transcribe_audio,
     "count_github_files": count_github_files,
     "run_python": run_python,
-    "calculate_with_email_offset": calculate_with_email_offset,
     "normalize_csv_to_json": normalize_csv_to_json,
     "sum_invoice_total": sum_invoice_total,
     "sum_log_bytes": sum_log_bytes,
@@ -693,7 +677,16 @@ def execute_tool(name: str, arguments: Dict) -> Any:
         
         # Try to parse as JSON (for arrays/objects)
         try:
-            return json.loads(answer)
+            parsed = json.loads(answer)
+            # UNWRAP: If it's a dict with "answer" key, extract the actual answer
+            if isinstance(parsed, dict):
+                if "answer" in parsed:
+                    parsed = parsed["answer"]
+                elif "json" in parsed:
+                    parsed = parsed["json"]
+                elif "plan" in parsed:
+                    parsed = parsed["plan"]
+            return parsed
         except:
             # Try as number
             try:
