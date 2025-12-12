@@ -123,7 +123,7 @@ Then call the appropriate tool.
 - Commands: exact string (e.g., uv http get URL -H "Accept: application/json")
 - Text: exact transcription only
 - Chart questions: JUST the letter (e.g., "B"), NOT a command, NOT an explanation
-- Tools questions: JUST an array of tool calls (e.g., [{{"tool":..., "args":...}}]), NOT an object with url/plan
+- Tools questions: JUST an array of tool calls. Example: [{{"name":"search_docs","args":{{"query":"issue 42 status"}}}},{{"name":"fetch_issue","args":{{"owner":"demo","repo":"api","id":42}}}},{{"name":"summarize","args":{{"text":"...","max_tokens":80}}}}]. Answer must START with [ and END with ]. NO wrapper object. NO "url" key. NO "plan" key.
 
 ## QUESTION TYPE → TOOL MAPPING
 - "uv http" → submit_final_answer with command string directly
@@ -136,7 +136,7 @@ Then call the appropriate tool.
 - Embeddings → find_similar_embeddings(url) → submit_final_answer(result)
 - Shards → calculate_shards(...) → submit_final_answer(json)
 - Chart/best pick → READ the question, submit JUST the letter (A, B, C, or D)
-- Tools/function calls → submit JUST an array [{{"tool":..., "args":...}}, ...]
+- Tools/function calls → ARRAY ONLY: [{{"name":"...", "args":{{...}}}}, ...]. No wrapper object.
 """
 
     # Initial user message
