@@ -7,7 +7,7 @@ import logging
 import requests
 from typing import Any, Dict, Optional
 
-from config import GITHUB_TOKEN, OPENAI_BASE_URL, LLM_MODEL, MAX_AGENT_STEPS, USER_EMAIL
+from config import AIPIPE_TOKEN, OPENAI_BASE_URL, LLM_MODEL, MAX_AGENT_STEPS, USER_EMAIL
 from tools import TOOLS, execute_tool
 from browser import render_page
 from submitter import submit_answer
@@ -233,7 +233,7 @@ def call_llm_with_tools(messages: list) -> Optional[dict]:
     """Call LLM with function calling support"""
     try:
         headers = {
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Authorization": f"Bearer {AIPIPE_TOKEN}",
             "Content-Type": "application/json"
         }
         
