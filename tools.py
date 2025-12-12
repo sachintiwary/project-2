@@ -170,11 +170,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "submit_final_answer",
-            "description": "Submit the final answer to the quiz. Call this when you have determined the answer.",
+            "description": "Submit the final answer to the quiz. Call this when you have determined the answer. For arrays or objects, pass as JSON string.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "answer": {"type": ["string", "number", "boolean", "array", "object"], "description": "The final answer to submit"}
+                    "answer": {"type": "string", "description": "The final answer (string, number, or JSON-encoded array/object)"}
                 },
                 "required": ["answer"]
             }
@@ -501,7 +501,18 @@ TOOL_FUNCTIONS = {
 def execute_tool(name: str, arguments: Dict) -> Any:
     """Execute a tool by name with arguments"""
     if name == "submit_final_answer":
-        return arguments.get("answer")
+        answer = arguments.get("answer", "")
+        # Try to parse as JSON (for arrays/objects)
+        try:
+            return json.loads(answer)
+        except:
+            # Try as number
+            try:
+                if '.' in str(answer):
+                    return float(answer)
+                return int(answer)
+            except:
+                return answer
     
     if name not in TOOL_FUNCTIONS:
         return f"Unknown tool: {name}"
@@ -510,3 +521,4 @@ def execute_tool(name: str, arguments: Dict) -> Any:
         return TOOL_FUNCTIONS[name](**arguments)
     except Exception as e:
         return f"Tool error: {e}"
+
