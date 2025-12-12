@@ -122,6 +122,8 @@ Then call the appropriate tool.
 - JSON: valid JSON, no markdown
 - Commands: exact string (e.g., uv http get URL -H "Accept: application/json")
 - Text: exact transcription only
+- Chart questions: JUST the letter (e.g., "B"), NOT a command, NOT an explanation
+- Tools questions: JUST an array of tool calls (e.g., [{tool:..., args:...}]), NOT an object with url/plan
 
 ## QUESTION TYPE → TOOL MAPPING
 - "uv http" → submit_final_answer with command string directly
@@ -133,6 +135,8 @@ Then call the appropriate tool.
 - Invoice total → sum_invoice_total(url) → submit_final_answer(number)
 - Embeddings → find_similar_embeddings(url) → submit_final_answer(result)
 - Shards → calculate_shards(...) → submit_final_answer(json)
+- Chart/best pick → READ the question, submit JUST the letter (A, B, C, or D)
+- Tools/function calls → submit JUST an array [{tool:..., args:...}, ...]
 """
 
     # Initial user message
