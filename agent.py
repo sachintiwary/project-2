@@ -100,7 +100,7 @@ Then call the appropriate tool.
 2. download_and_read_file(url) - Read CSV/JSON/PDF/ZIP
 3. get_image_dominant_color(url) - Returns hex like #aabbcc
 4. transcribe_audio(url) - Transcribe audio files to text
-5. count_github_files(owner, repo, sha, path_prefix, extension) - Count files + email offset
+5. count_github_files(owner, repo, sha, path_prefix, extension) - Returns FINAL count (already includes email offset)
 6. run_python(code) - Execute Python, must set 'result' variable
 7. calculate_with_email_offset(base_value, divisor) - Add email-based offset
 8. normalize_csv_to_json(url) - Normalize CSV to JSON array
@@ -130,7 +130,7 @@ Then call the appropriate tool.
 - Audio transcription → transcribe_audio(url) → submit_final_answer(text)
 - Heatmap/color → get_image_dominant_color(url) → submit_final_answer(hex)
 - CSV normalize → normalize_csv_to_json(url) → submit_final_answer(json)
-- GitHub file count → count_github_files(...) → submit_final_answer(count)
+- GitHub file count → count_github_files(...) → submit THE EXACT NUMBER returned (offset already included, do NOT add more)
 - Log bytes → sum_log_bytes(url) → submit_final_answer(number)
 - Invoice total → sum_invoice_total(url) → submit_final_answer(number)
 - Embeddings → find_similar_embeddings(url) → submit_final_answer(result)
