@@ -6,6 +6,7 @@ gunicorn==21.2.0
 
 # LLM API Client
 openai==1.6.0
+google-genai
 
 # Browser Automation
 playwright==1.40.0
