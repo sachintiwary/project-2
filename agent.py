@@ -62,9 +62,15 @@ SYSTEM_PROMPT = """You are a quiz-solving AI agent. Your job is to answer questi
 - Audio passphrase → transcribe_audio → submit exact text
 - Heatmap/color → get_dominant_color → submit hex code
 - CSV normalize → normalize_csv → submit array directly
-- GitHub files → count_github_files → submit the number returned
+- GitHub files → count_github_files → submit the number returned (includes email offset)
 - Invoice total → sum_invoice → submit the number
 - Log bytes → sum_log_bytes → submit the number
+
+## EMAIL OFFSET (IMPORTANT!)
+Some questions require adding an offset based on email length:
+- "email length mod 2" → {email_length} mod 2 = {email_mod2}
+- "email length mod 3" → {email_length} mod 3 = {email_mod3}
+If a question mentions adding email-based offset, ADD IT to your final answer!
 
 ## CONTEXT
 - User email: {email}
@@ -130,9 +136,12 @@ def solve_question(page_data: dict) -> Optional[Any]:
     """Use LLM to solve a single question"""
     
     # Build system prompt
+    email_len = len(USER_EMAIL)
     system = SYSTEM_PROMPT.format(
         email=USER_EMAIL,
-        email_length=len(USER_EMAIL)
+        email_length=email_len,
+        email_mod2=email_len % 2,
+        email_mod3=email_len % 3
     )
     
     # Build user message
@@ -169,9 +178,23 @@ Remember: Submit ONLY the answer value, not wrapped in any object!
         tool_calls = message.get("tool_calls", [])
         
         if not tool_calls:
-            # No tools called - check for direct answer in content
+            # No tools called - try to extract answer from content
             content = message.get("content", "")
             logger.info(f"No tools, content: {content[:200]}")
+            
+            # Try to parse content as JSON and return it as the answer
+            if content:
+                try:
+                    # Try parsing as JSON array or object
+                    parsed = json.loads(content)
+                    logger.info(f"Auto-extracted answer from content: {str(parsed)[:200]}")
+                    return parsed
+                except:
+                    # Return content as-is if it looks like an answer
+                    content = content.strip()
+                    if content and len(content) < 5000:
+                        logger.info(f"Returning content as answer: {content[:200]}")
+                        return content
             return None
         
         # Add assistant message
