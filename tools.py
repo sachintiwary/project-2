@@ -170,6 +170,26 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "calculate_shards",
+            "description": "Calculate optimal shards and replicas for a dataset given constraints. Returns JSON with {shards, replicas}.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dataset": {"type": "integer", "description": "Total number of documents"},
+                    "max_docs_per_shard": {"type": "integer", "description": "Maximum documents per shard"},
+                    "max_shards": {"type": "integer", "description": "Maximum number of shards allowed"},
+                    "min_replicas": {"type": "integer", "description": "Minimum replicas per shard"},
+                    "max_replicas": {"type": "integer", "description": "Maximum replicas per shard"},
+                    "memory_per_shard": {"type": "number", "description": "Memory (GB) per shard replica"},
+                    "memory_budget": {"type": "number", "description": "Total memory budget (GB)"}
+                },
+                "required": ["dataset", "max_docs_per_shard", "max_shards", "min_replicas", "max_replicas", "memory_per_shard", "memory_budget"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit_final_answer",
             "description": "Submit the final answer to the quiz. Call this when you have determined the answer. For arrays or objects, pass as JSON string.",
             "parameters": {
@@ -273,10 +293,9 @@ def get_image_dominant_color(url: str) -> str:
 
 
 def transcribe_audio(url: str) -> str:
-    """Transcribe audio file using OpenAI client with gpt-4o-transcribe"""
+    """Transcribe audio file using whisper-1 via AI Pipe"""
     try:
-        from openai import OpenAI
-        from config import AIPIPE_TOKEN, OPENAI_BASE_URL
+        from config import AIPIPE_TOKEN
         
         logger.info(f"Transcribing: {url}")
         
@@ -288,8 +307,8 @@ def transcribe_audio(url: str) -> str:
             f.write(resp.content)
             audio_path = f.name
         
-        # Convert to mp3 if needed (gpt-4o-transcribe may need standard format)
-        if ext in ['.opus', '.ogg', '.m4a']:
+        # Convert to mp3 if needed
+        if ext in ['.opus', '.ogg', '.m4a', '.webm']:
             try:
                 from pydub import AudioSegment
                 audio = AudioSegment.from_file(audio_path)
@@ -300,20 +319,28 @@ def transcribe_audio(url: str) -> str:
             except Exception as e:
                 logger.warning(f"Audio conversion failed: {e}")
         
-        # Use OpenAI client with AI Pipe
-        client = OpenAI(
-            api_key=AIPIPE_TOKEN,
-            base_url=OPENAI_BASE_URL
-        )
+        # Use whisper-1 via direct API call with proper multipart
+        api_url = "https://aipipe.org/openai/v1/audio/transcriptions"
         
         with open(audio_path, 'rb') as audio_file:
-            transcript = client.audio.transcriptions.create(
-                model="gpt-4o-transcribe",
-                file=audio_file
-            )
+            files = {
+                'file': (os.path.basename(audio_path), audio_file, 'audio/mpeg'),
+                'model': (None, 'whisper-1'),
+            }
+            headers = {'Authorization': f'Bearer {AIPIPE_TOKEN}'}
+            
+            response = requests.post(api_url, files=files, headers=headers, timeout=120)
         
-        logger.info(f"Transcription: {transcript.text}")
-        return transcript.text
+        logger.info(f"Whisper response: {response.status_code}")
+        
+        if response.status_code == 200:
+            result = response.json()
+            text = result.get('text', '')
+            logger.info(f"Transcription: {text}")
+            return text
+        else:
+            logger.error(f"Transcription error: {response.text}")
+            return f"Error: {response.status_code} - {response.text}"
             
     except Exception as e:
         logger.error(f"Transcription error: {e}")
@@ -508,6 +535,54 @@ def sum_log_bytes(url: str) -> int:
         return f"Error: {e}"
 
 
+def calculate_shards(dataset: int, max_docs_per_shard: int, max_shards: int, 
+                     min_replicas: int, max_replicas: int, 
+                     memory_per_shard: float, memory_budget: float) -> dict:
+    """Calculate optimal shards and replicas configuration"""
+    import math
+    
+    logger.info(f"Calculating shards: dataset={dataset}, max_docs={max_docs_per_shard}, max_shards={max_shards}")
+    
+    # Calculate minimum shards needed
+    min_shards = math.ceil(dataset / max_docs_per_shard)
+    
+    logger.info(f"Min shards needed: {min_shards}")
+    
+    best_config = None
+    
+    # Try all valid shard counts starting from minimum
+    for shards in range(min_shards, max_shards + 1):
+        # Try all valid replica counts starting from maximum (for fault tolerance)
+        for replicas in range(max_replicas, min_replicas - 1, -1):
+            total_memory = shards * replicas * memory_per_shard
+            
+            if total_memory <= memory_budget:
+                # This configuration is valid
+                config = {"shards": shards, "replicas": replicas}
+                logger.info(f"Valid config: {config}, memory: {total_memory}")
+                
+                # Prefer maximum replicas for fault tolerance
+                if best_config is None:
+                    best_config = config
+                    break  # Found best for this shard count
+        
+        if best_config:
+            break  # Found valid config, stop
+    
+    if best_config:
+        logger.info(f"Best config: {best_config}")
+        return best_config
+    else:
+        # If no valid config with max replicas, try minimum
+        for shards in range(min_shards, max_shards + 1):
+            for replicas in range(min_replicas, max_replicas + 1):
+                total_memory = shards * replicas * memory_per_shard
+                if total_memory <= memory_budget:
+                    return {"shards": shards, "replicas": replicas}
+        
+        return {"error": "No valid configuration found"}
+
+
 # Tool dispatcher
 TOOL_FUNCTIONS = {
     "fetch_webpage": fetch_webpage,
@@ -520,6 +595,7 @@ TOOL_FUNCTIONS = {
     "normalize_csv_to_json": normalize_csv_to_json,
     "sum_invoice_total": sum_invoice_total,
     "sum_log_bytes": sum_log_bytes,
+    "calculate_shards": calculate_shards,
 }
 
 
