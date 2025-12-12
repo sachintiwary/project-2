@@ -310,6 +310,7 @@ def transcribe_audio(url: str) -> str:
     """Transcribe audio file using Gemini 2.5 Flash via google-genai library"""
     try:
         from google import genai
+        from google.genai import types
         from config import GEMINI_API_KEY
         
         logger.info(f"Transcribing with Gemini 2.5 Flash: {url}")
@@ -322,31 +323,47 @@ def transcribe_audio(url: str) -> str:
             f.write(resp.content)
             audio_path = f.name
         
-        # Convert to mp3 if needed for better compatibility
-        if ext in ['.opus', '.ogg', '.m4a', '.webm']:
+        # Determine MIME type
+        mime_map = {
+            '.mp3': 'audio/mp3',
+            '.wav': 'audio/wav',
+            '.ogg': 'audio/ogg',
+            '.opus': 'audio/ogg',  # Opus is usually in Ogg container
+            '.m4a': 'audio/aac',
+            '.aac': 'audio/aac',
+            '.flac': 'audio/flac',
+        }
+        mime_type = mime_map.get(ext, 'audio/mp3')
+        
+        # Convert to mp3 if format not directly supported
+        if ext in ['.opus', '.webm']:
             try:
                 from pydub import AudioSegment
                 audio = AudioSegment.from_file(audio_path)
                 mp3_path = audio_path.replace(ext, '.mp3')
                 audio.export(mp3_path, format='mp3')
                 audio_path = mp3_path
+                mime_type = 'audio/mp3'
                 logger.info(f"Converted to: {mp3_path}")
             except Exception as e:
                 logger.warning(f"Audio conversion failed: {e}")
         
-        # Initialize google-genai client
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        # Upload audio file
+        # Read audio bytes
         with open(audio_path, 'rb') as f:
             audio_bytes = f.read()
         
-        # Use gemini-2.5-flash for transcription
+        # Initialize google-genai client
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        # Use gemini-2.5-flash for transcription with types.Part.from_bytes
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
-                "Transcribe this audio exactly. Only output the spoken words, nothing else.",
-                {"mime_type": "audio/mpeg", "data": audio_bytes}
+                "Generate a transcript of the speech. Only output the exact spoken words, nothing else.",
+                types.Part.from_bytes(
+                    data=audio_bytes,
+                    mime_type=mime_type,
+                )
             ]
         )
         
