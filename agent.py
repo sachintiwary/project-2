@@ -65,6 +65,7 @@ SYSTEM_PROMPT = """You are a quiz-solving AI agent. Your job is to answer questi
 - GitHub files → count_github_files → submit the number returned (includes email offset)
 - Invoice total → sum_invoice → submit the number
 - Log bytes → sum_log_bytes → submit the number
+- Rate limiting → calculate_rate_minutes → submit the number returned (includes email offset)
 
 ## EMAIL OFFSET (IMPORTANT!)
 Some questions require adding an offset based on email length:
