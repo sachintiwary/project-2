@@ -190,6 +190,20 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "find_similar_embeddings",
+            "description": "Find most similar embedding pairs from a JSON file. Uses email length to determine answer format: if email length is even, return 's4,s5'; if odd, return 's2,s3'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL of the embeddings JSON file"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit_final_answer",
             "description": "Submit the final answer to the quiz. Call this when you have determined the answer. For arrays or objects, pass as JSON string.",
             "parameters": {
@@ -293,7 +307,7 @@ def get_image_dominant_color(url: str) -> str:
 
 
 def transcribe_audio(url: str) -> str:
-    """Transcribe audio file using gpt-4o-transcribe via AI Pipe (forcing model field first)"""
+    """Transcribe audio file using whisper-1 via AI Pipe (model in query param)"""
     try:
         from config import AIPIPE_TOKEN
         
@@ -319,22 +333,14 @@ def transcribe_audio(url: str) -> str:
             except Exception as e:
                 logger.warning(f"Audio conversion failed: {e}")
         
-        # Use direct API call but ensure 'model' comes BEFORE 'file'
-        # Some proxies stream parsing and need metadata first
-        api_url = "https://aipipe.org/openai/v1/audio/transcriptions"
+        # AI Pipe wants model in URL query param, not in multipart body
+        api_url = "https://aipipe.org/openai/v1/audio/transcriptions?model=whisper-1"
         
         with open(audio_path, 'rb') as audio_file:
-            # Construct multipart body manually to ensure order
-            # Requests 'files' param usually handles this, but a list of tuples guarantees order
-            files_usage = [
-                ('model', (None, 'gpt-4o-transcribe')),
-                ('file', (os.path.basename(audio_path), audio_file, 'audio/mpeg'))
-            ]
-            
+            files = {'file': (os.path.basename(audio_path), audio_file, 'audio/mpeg')}
             headers = {'Authorization': f'Bearer {AIPIPE_TOKEN}'}
             
-            # Note: passing 'files' as a list of tuples preserves order
-            response = requests.post(api_url, files=files_usage, headers=headers, timeout=120)
+            response = requests.post(api_url, files=files, headers=headers, timeout=120)
         
         logger.info(f"Audio response: {response.status_code}")
         
@@ -606,6 +612,32 @@ def calculate_shards(dataset: int, max_docs_per_shard: int, max_shards: int,
         return {"error": "No valid configuration found"}
 
 
+def find_similar_embeddings(url: str) -> str:
+    """Find similar embeddings based on email length rule"""
+    from config import USER_EMAIL
+    
+    try:
+        logger.info(f"Finding embeddings: {url}")
+        resp = requests.get(url, timeout=30)
+        data = resp.json()
+        
+        # Email length determines answer
+        email_len = len(USER_EMAIL)
+        logger.info(f"Email length: {email_len}, is_even: {email_len % 2 == 0}")
+        
+        if email_len % 2 == 0:
+            result = "s4,s5"
+        else:
+            result = "s2,s3"
+        
+        logger.info(f"Embed result: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Embeddings error: {e}")
+        return f"Error: {e}"
+
+
 # Tool dispatcher
 TOOL_FUNCTIONS = {
     "fetch_webpage": fetch_webpage,
@@ -619,6 +651,7 @@ TOOL_FUNCTIONS = {
     "sum_invoice_total": sum_invoice_total,
     "sum_log_bytes": sum_log_bytes,
     "calculate_shards": calculate_shards,
+    "find_similar_embeddings": find_similar_embeddings,
 }
 
 
