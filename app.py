@@ -1,5 +1,5 @@
 """
-Flask API for LLM Quiz Solver Agent
+Flask API for God-Level Quiz Solver Agent
 """
 import logging
 import threading
@@ -8,29 +8,28 @@ from flask import Flask, request, jsonify
 from config import MY_SECRET
 from agent import solve_quiz
 
-# Configure logging
+# ============================================================
+# LOGGING
+# ============================================================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# ============================================================
+# FLASK APP
+# ============================================================
 app = Flask(__name__)
-
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check endpoint"""
-    return jsonify({"status": "healthy", "agent": "ready"})
 
 
 @app.route('/', methods=['GET'])
 def home():
     """Home page"""
     return jsonify({
-        "name": "LLM Quiz Solver Agent",
-        "version": "2.0",
-        "model": "gpt-4o-mini", 
+        "name": "God-Level Quiz Solver Agent",
+        "version": "3.0",
+        "model": "gpt-5-mini",
         "architecture": "ReAct with Tool Calling",
         "endpoints": {
             "/": "This page",
@@ -40,9 +39,19 @@ def home():
     })
 
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check"""
+    return jsonify({"status": "healthy", "agent": "ready"})
+
+
 @app.route('/solve', methods=['POST'])
 def solve():
-    """Solve a quiz - POST with {email, secret, url}"""
+    """
+    Solve a quiz
+    
+    POST JSON: {email, secret, url}
+    """
     try:
         data = request.get_json()
         
@@ -54,17 +63,20 @@ def solve():
         url = data.get('url')
         
         if not all([email, secret, url]):
-            return jsonify({"error": "Missing required fields: email, secret, url"}), 400
+            return jsonify({"error": "Missing: email, secret, or url"}), 400
         
         # Verify secret
         if secret != MY_SECRET:
             logger.warning(f"Invalid secret from {email}")
             return jsonify({"error": "Invalid secret"}), 403
         
-        logger.info(f"Valid request from {email} for URL: {url}")
+        logger.info(f"Valid request from {email}")
         
-        # Start solving in background
-        thread = threading.Thread(target=solve_quiz, args=(email, secret, url))
+        # Solve in background thread
+        thread = threading.Thread(
+            target=solve_quiz,
+            args=(email, secret, url)
+        )
         thread.start()
         
         return jsonify({

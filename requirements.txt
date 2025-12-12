@@ -1,27 +1,25 @@
-# LLM Quiz Solver Dependencies
+# Core
+flask>=2.0.0
+gunicorn>=21.0.0
+requests>=2.28.0
 
-# Web Framework
-flask==3.0.0
-gunicorn==21.2.0
+# Browser
+playwright>=1.40.0
 
-# LLM API Client
-openai==1.6.0
-google-genai
+# LLM APIs
+openai>=1.0.0
 
-# Browser Automation
-playwright==1.40.0
+# Audio transcription (Gemini)
+google-genai>=0.3.0
+pydub>=0.25.0
 
-# Data Processing
-pandas==2.1.4
-pdfplumber==0.10.3
+# PDF processing
+pdfplumber>=0.9.0
 
-# Audio Processing
-SpeechRecognition==3.10.0
-pydub==0.25.1
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+python-dateutil>=2.8.0
 
-# Image Processing
-Pillow==10.1.0
-
-# HTTP Client
-requests==2.31.0
-httpx==0.25.2
+# Image processing
+Pillow>=10.0.0

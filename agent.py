@@ -1,42 +1,106 @@
 """
-Agent Module - Core ReAct agent with tool calling
-Uses DeepSeek-V3 via GitHub Models for reasoning
+Agent Module - The Brain
+ReAct architecture with strict format enforcement
 """
 import json
 import logging
 import requests
 from typing import Any, Dict, Optional
 
-from config import AIPIPE_TOKEN, OPENAI_BASE_URL, LLM_MODEL, MAX_AGENT_STEPS, USER_EMAIL
+from config import AIPIPE_TOKEN, OPENAI_BASE_URL, LLM_MODEL, MAX_STEPS, USER_EMAIL
 from tools import TOOLS, execute_tool
 from browser import render_page
 from submitter import submit_answer
 
 logger = logging.getLogger(__name__)
 
+# ============================================================
+# SYSTEM PROMPT - THE KEY TO SUCCESS
+# ============================================================
 
-def solve_quiz(email: str, secret: str, url: str):
-    """Main entry - solve quiz using agent"""
-    current_url = url
+SYSTEM_PROMPT = """You are a quiz-solving AI agent. Your job is to answer questions correctly.
+
+## WORKFLOW
+1. Read the question carefully
+2. Call ONE appropriate tool to get data
+3. Call submit_answer with the result
+
+## ANSWER FORMAT RULES (CRITICAL!)
+
+### Single Letter Questions (chart, visualization, best option):
+- Submit ONLY the letter: A, B, C, or D
+- ✅ CORRECT: B
+- ❌ WRONG: {"answer": "B"}
+
+### Number Questions:
+- Submit ONLY the number
+- ✅ CORRECT: 335
+- ✅ CORRECT: 170.97
+- ❌ WRONG: "The answer is 335"
+
+### Hex Color Questions:
+- Submit ONLY the hex code
+- ✅ CORRECT: #b45a1e
+- ❌ WRONG: "The dominant color is #b45a1e"
+
+### Text/Transcription Questions:
+- Submit ONLY the exact text
+- ✅ CORRECT: hushed parrot 219
+- ❌ WRONG: "The passphrase is hushed parrot 219"
+
+### JSON Array Questions (CSV normalization, tool calls):
+- Submit ONLY the array, no wrapper
+- ✅ CORRECT: [{"id": 1}, {"id": 2}]
+- ❌ WRONG: {"data": [...]}
+
+### Command Questions (uv http):
+- Submit the exact command string
+- ✅ CORRECT: uv http get https://example.com -H "Accept: application/json"
+- ❌ WRONG: uv http get "https://example.com"  (no quotes around URL)
+
+## TOOL MAPPING
+- Audio passphrase → transcribe_audio → submit exact text
+- Heatmap/color → get_dominant_color → submit hex code
+- CSV normalize → normalize_csv → submit array directly
+- GitHub files → count_github_files → submit the number returned
+- Invoice total → sum_invoice → submit the number
+- Log bytes → sum_log_bytes → submit the number
+
+## CONTEXT
+- User email: {email}
+- Email length: {email_length}
+
+IMPORTANT: Always submit CLEAN answers, not wrapped in objects!
+"""
+
+# ============================================================
+# MAIN SOLVER
+# ============================================================
+
+def solve_quiz(email: str, secret: str, start_url: str):
+    """Main quiz solving loop"""
+    current_url = start_url
+    question_num = 0
     max_questions = 20
-    question_count = 0
     
-    while current_url and question_count < max_questions:
-        question_count += 1
+    while current_url and question_num < max_questions:
+        question_num += 1
         logger.info(f"\n{'='*60}")
-        logger.info(f"Question {question_count}: {current_url}")
+        logger.info(f"Question {question_num}: {current_url}")
         logger.info('='*60)
         
         try:
             # Render page
             page_data = render_page(current_url)
             
-            # Use agent to solve
-            answer = agent_solve(page_data)
+            # Solve with agent
+            answer = solve_question(page_data)
             
             if answer is None:
                 logger.error("Agent failed to produce answer")
                 break
+            
+            logger.info(f"Final answer: {answer}")
             
             # Submit
             result = submit_answer(
@@ -48,152 +112,72 @@ def solve_quiz(email: str, secret: str, url: str):
             )
             
             if result.get("correct"):
-                logger.info("✓ Answer correct!")
+                logger.info("✓ CORRECT!")
             else:
-                logger.warning(f"✗ Answer incorrect: {result.get('reason', 'No reason')}")
+                logger.warning(f"✗ WRONG: {result.get('reason', 'No reason')}")
             
-            next_url = result.get("url")
-            if next_url:
-                current_url = next_url
-            else:
-                logger.info("Quiz complete!")
-                break
-                
+            # Move to next
+            current_url = result.get("url")
+            
         except Exception as e:
-            logger.error(f"Error: {e}", exc_info=True)
+            logger.error(f"Error: {e}")
             break
     
-    logger.info(f"\nCompleted {question_count} questions")
+    logger.info(f"\nCompleted {question_num} questions")
 
 
-def agent_solve(page_data: dict) -> Any:
-    """
-    Agent solves the question using ReAct loop with tool calling
-    """
-    content = page_data["content"]
-    html = page_data["html"]
-    base_url = page_data["base_url"]
+def solve_question(page_data: dict) -> Optional[Any]:
+    """Use LLM to solve a single question"""
     
-    # Extract URLs from the page for context
-    urls = extract_urls_from_page(html, base_url)
+    # Build system prompt
+    system = SYSTEM_PROMPT.format(
+        email=USER_EMAIL,
+        email_length=len(USER_EMAIL)
+    )
     
-    # System prompt - Chain of Thought (CoT) for gpt-5-mini
-    system = f"""You are an expert quiz-solving AI with advanced reasoning capabilities.
+    # Build user message
+    user_msg = f"""
+## QUESTION
+{page_data['content']}
 
-## CRITICAL INSTRUCTION:
-Before calling ANY tool, you MUST perform a "Silent Thought" process:
-1. [THOUGHT] Analyze: What is the question asking?
-2. [THOUGHT] Check: Do I have the URL/parameters needed?
-3. [THOUGHT] Plan: Which tool should I use?
-4. [THOUGHT] Verify: Is my answer in the correct format?
+## FILE URLS
+{json.dumps(page_data['files'], indent=2)}
 
-Then call the appropriate tool.
+## INSTRUCTIONS
+1. Analyze what type of question this is
+2. Call the appropriate tool with the correct URL
+3. Submit the answer in the EXACT format required
 
-## USER CONTEXT
-- Email: {USER_EMAIL}
-- Email length: {len(USER_EMAIL)}
-- Email length % 2 = {len(USER_EMAIL) % 2} (0=even, 1=odd)
-- Email length % 3 = {len(USER_EMAIL) % 3}
-
-## AVAILABLE TOOLS
-1. fetch_webpage(url) - Get webpage content
-2. download_and_read_file(url) - Read CSV/JSON/PDF/ZIP
-3. get_image_dominant_color(url) - Returns hex like #aabbcc
-4. transcribe_audio(url) - Transcribe audio files to text
-5. count_github_files(owner, repo, sha, path_prefix, extension) - Returns FINAL count (already includes email offset)
-6. run_python(code) - Execute Python, must set 'result' variable
-7. calculate_with_email_offset(base_value, divisor) - Add email-based offset
-8. normalize_csv_to_json(url) - Normalize CSV to JSON array
-9. sum_invoice_total(url) - Sum Quantity*UnitPrice from PDF invoice
-10. sum_log_bytes(url) - Sum bytes from logs.zip where event=='download'
-11. calculate_shards(dataset, max_docs_per_shard, max_shards, min_replicas, max_replicas, memory_per_shard, memory_budget) - Optimal shards config
-12. find_similar_embeddings(url) - Returns "s4,s5" if email even, "s2,s3" if odd
-13. submit_final_answer(answer) - REQUIRED: Submit final answer
-
-## TOOL USE RULES
-- ONLY call a tool if you have ALL required arguments
-- Do NOT guess or invent parameters
-- Do NOT retry failed tools more than twice
-- ALWAYS end with submit_final_answer
-
-## ANSWER FORMAT RULES - READ CAREFULLY!
-
-### FORMAT EXAMPLES (FOLLOW EXACTLY):
-
-1. **Chart/visualization questions** (which chart is best?):
-   - ✅ CORRECT: B
-   - ❌ WRONG: {{"answer": "B"}}
-   - ❌ WRONG: {{"url": "...", "answer": "B"}}
-   - JUST the single letter!
-
-2. **CSV normalization** (normalize this CSV):
-   - ✅ CORRECT: [{{"id": 1, "name": "Alpha", "joined": "2024-01-30", "value": 5}}]
-   - ❌ WRONG: {{"url": "...", "json": [...]}}
-   - ❌ WRONG: {{"data": [...]}}
-   - JUST the array, starting with [ and ending with ]
-
-3. **Tool planning** (design tool calls):
-   - ✅ CORRECT: [{{"name": "search_docs", "args": {{"query": "issue 42"}}}}, {{"name": "fetch_issue", "args": {{"owner": "demo", "repo": "api", "id": 42}}}}]
-   - ❌ WRONG: {{"url": "...", "plan": [...]}}
-   - ❌ WRONG: {{"tools": [...]}}
-   - JUST the array of tool objects!
-
-4. **UV commands**:
-   - ✅ CORRECT: uv http get https://example.com/file.json -H "Accept: application/json"
-   - ❌ WRONG: uv http get "https://example.com/file.json"
-   - NO quotes around URL!
-
-5. **Hex colors**: #aabbcc (lowercase, with #)
-6. **Numbers**: just the number (335, 170.97)
-7. **Transcription**: just the text (hushed parrot 219)
+Remember: Submit ONLY the answer value, not wrapped in any object!
 """
-
-    # Initial user message
-    url_context = "\\n".join([f"- {t}: {u}" for t, u in urls.items()]) if urls else "No file URLs found"
     
-    user_msg = f"""[TASK] Solve this quiz question.
-
-QUESTION:
-{content}
-
-DETECTED RESOURCES:
-{url_context}
-
-[INSTRUCTION] 
-1. First, write your [THOUGHT] analysis
-2. Then call the appropriate tool
-3. Finally, call submit_final_answer with the result"""
-
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": user_msg}
     ]
     
     # Agent loop
-    for step in range(MAX_AGENT_STEPS):
-        logger.info(f"Agent step {step + 1}")
+    for step in range(MAX_STEPS):
+        logger.info(f"Step {step + 1}")
         
-        response = call_llm_with_tools(messages)
-        
+        response = call_llm(messages)
         if not response:
             logger.error("LLM call failed")
             break
         
         message = response.get("choices", [{}])[0].get("message", {})
-        
-        # Check for tool calls
         tool_calls = message.get("tool_calls", [])
         
         if not tool_calls:
-            # No tools called - might have direct answer
+            # No tools called - check for direct answer in content
             content = message.get("content", "")
-            logger.info(f"Agent response (no tools): {content[:200]}")
-            return content
+            logger.info(f"No tools, content: {content[:200]}")
+            return None
         
-        # Add assistant message with tool calls
+        # Add assistant message
         messages.append(message)
         
-        # Execute each tool
+        # Execute tools
         for tool_call in tool_calls:
             tool_name = tool_call["function"]["name"]
             
@@ -202,22 +186,19 @@ DETECTED RESOURCES:
             except:
                 args = {}
             
-            logger.info(f"Tool: {tool_name}({json.dumps(args)[:100]})")
+            logger.info(f"Tool: {tool_name}({json.dumps(args)[:80]})")
             
-            # Execute tool
+            # Execute
             result = execute_tool(tool_name, args)
             
-            # Check if this is the final answer
-            if tool_name == "submit_final_answer":
-                logger.info(f"Final answer: {result}")
+            # Check if this is submit_answer
+            if tool_name == "submit_answer":
                 return result
             
-            # Add tool result to messages
+            # Add tool result
             result_str = json.dumps(result) if not isinstance(result, str) else result
             if len(result_str) > 10000:
                 result_str = result_str[:10000] + "...[truncated]"
-            
-            logger.info(f"Tool result: {result_str[:200]}")
             
             messages.append({
                 "role": "tool",
@@ -225,63 +206,34 @@ DETECTED RESOURCES:
                 "content": result_str
             })
     
-    logger.warning("Agent reached max steps without answer")
+    logger.warning("Max steps reached without answer")
     return None
 
 
-def call_llm_with_tools(messages: list) -> Optional[dict]:
-    """Call LLM with function calling support"""
+def call_llm(messages: list) -> Optional[dict]:
+    """Call LLM with function calling"""
     try:
-        headers = {
-            "Authorization": f"Bearer {AIPIPE_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": LLM_MODEL,
-            "messages": messages,
-            "tools": TOOLS,
-            "tool_choice": "auto"
-        }
-        
         response = requests.post(
             f"{OPENAI_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
+            headers={
+                "Authorization": f"Bearer {AIPIPE_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": LLM_MODEL,
+                "messages": messages,
+                "tools": TOOLS,
+                "tool_choice": "auto"
+            },
             timeout=60
         )
         
         if response.status_code == 200:
             return response.json()
         else:
-            logger.error(f"LLM error: {response.status_code} - {response.text}")
+            logger.error(f"LLM error: {response.status_code} - {response.text[:200]}")
             return None
             
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
         return None
-
-
-def extract_urls_from_page(html: str, base_url: str) -> Dict[str, str]:
-    """Extract file URLs from page HTML"""
-    import re
-    from urllib.parse import urljoin
-    
-    urls = {}
-    
-    patterns = {
-        'csv': r'href=["\']([^"\']+\.csv)["\']',
-        'json': r'href=["\']([^"\']+\.json)["\']',
-        'pdf': r'href=["\']([^"\']+\.pdf)["\']',
-        'zip': r'href=["\']([^"\']+\.zip)["\']',
-        'audio': r'href=["\']([^"\']+\.(?:mp3|wav|opus|ogg|m4a))["\']',
-        'image': r'(?:href|src)=["\']([^"\']+\.(?:png|jpg|jpeg|gif))["\']',
-    }
-    
-    for file_type, pattern in patterns.items():
-        matches = re.findall(pattern, html, re.IGNORECASE)
-        for match in matches:
-            url = match if match.startswith('http') else urljoin(base_url + '/', match.lstrip('/'))
-            urls[file_type] = url
-    
-    return urls

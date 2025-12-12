@@ -1,10 +1,10 @@
 """
-Browser automation using Playwright for JavaScript rendering
+Browser Module - Playwright page rendering and URL extraction
 """
 import re
 import logging
 from playwright.sync_api import sync_playwright
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 from config import BROWSER_TIMEOUT
 
@@ -15,18 +15,16 @@ def render_page(url: str) -> dict:
     """
     Render a JavaScript page and extract content
     
-    Args:
-        url: The quiz page URL to render
-    
     Returns:
         {
-            "content": "Full rendered text content",
-            "html": "Full rendered HTML",
-            "submit_url": "Extracted submission URL",
-            "base_url": "Base URL for relative links"
+            "content": "rendered text content",
+            "html": "rendered HTML",
+            "submit_url": "extracted submit URL",
+            "base_url": "base URL for relative links",
+            "files": {"audio": [], "csv": [], "json": [], ...}
         }
     """
-    logger.info(f"Rendering page: {url}")
+    logger.info(f"Rendering: {url}")
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -34,130 +32,106 @@ def render_page(url: str) -> dict:
         page = context.new_page()
         
         try:
-            # Navigate and wait for JavaScript to execute
             page.goto(url, timeout=BROWSER_TIMEOUT)
-            page.wait_for_load_state('networkidle', timeout=BROWSER_TIMEOUT)
+            page.wait_for_load_state("networkidle", timeout=BROWSER_TIMEOUT)
             
-            # Get rendered content
+            content = page.inner_text("body")
             html = page.content()
-            text_content = page.inner_text('body')
             
-            logger.info(f"Page rendered successfully. Content length: {len(text_content)} chars")
-            
-            # Extract the base URL
             parsed = urlparse(url)
             base_url = f"{parsed.scheme}://{parsed.netloc}"
             
-            # Extract submit URL from the page content
-            submit_url = extract_submit_url(text_content, html, base_url)
+            submit_url = extract_submit_url(content, html, base_url)
+            files = extract_file_urls(html, base_url)
+            
+            logger.info(f"Content length: {len(content)} chars")
             
             return {
-                "content": text_content,
+                "content": content,
                 "html": html,
                 "submit_url": submit_url,
                 "base_url": base_url,
-                "page_url": url
+                "page_url": url,
+                "files": files
             }
             
         finally:
             browser.close()
 
 
-def extract_submit_url(text_content: str, html: str, base_url: str) -> str:
+def extract_submit_url(content: str, html: str, base_url: str) -> str:
     """
-    Extract the submission URL from page content
-    
-    CRITICAL: This function explicitly extracts the URL from page content.
-    It does NOT rely on LLM to determine the URL!
-    
-    Args:
-        text_content: Rendered text content of the page
-        html: Rendered HTML content
-        base_url: Base URL for constructing absolute URLs
-    
-    Returns:
-        The submission URL
+    Extract submission URL from page content
+    CRITICAL: Extracts from page, NOT hallucinated!
     """
-    logger.info("Extracting submit URL from page content")
+    logger.info("Extracting submit URL")
     
-    # Pattern 1: "Post your answer to https://..." 
+    # Pattern 1: "Post your answer to https://..."
     patterns = [
-        r'[Pp]ost\s+(?:your\s+)?answer\s+to\s+(https?://[^\s<>"\']+)',
-        r'[Ss]ubmit\s+(?:your\s+)?answer\s+to\s+(https?://[^\s<>"\']+)',
-        r'[Ss]end\s+(?:your\s+)?(?:answer|response)\s+to\s+(https?://[^\s<>"\']+)',
+        r'(?:post|submit|send).*?(https?://[^\s<>"]+/submit[^\s<>"]*)',
+        r'(https?://[^\s<>"]+/submit)',
+        r'/submit[^\s<>"]*',
     ]
     
     for pattern in patterns:
-        match = re.search(pattern, text_content)
+        match = re.search(pattern, content, re.IGNORECASE)
         if match:
-            url = match.group(1).rstrip('.,;:)')
-            logger.info(f"Found submit URL via pattern: {url}")
+            url = match.group(1) if '(' in pattern else match.group(0)
+            if url.startswith('/'):
+                url = base_url + url
+            logger.info(f"Found submit URL: {url}")
             return url
     
-    # Pattern 2: Look for URL in JSON example blocks containing "submit"
-    json_url_pattern = r'"url":\s*"(https?://[^"]*submit[^"]*)"'
-    match = re.search(json_url_pattern, text_content, re.IGNORECASE)
-    if match:
-        url = match.group(1)
-        logger.info(f"Found submit URL in JSON example: {url}")
-        return url
-    
-    # Pattern 3: Look for any URL containing "/submit"
-    submit_pattern = r'(https?://[^\s<>"\']+/submit[^\s<>"\']*)'
-    match = re.search(submit_pattern, text_content)
-    if match:
-        url = match.group(1).rstrip('.,;:)')
-        logger.info(f"Found submit URL containing /submit: {url}")
-        return url
-    
-    # Pattern 4: Check HTML for submit URLs in href or action attributes
-    html_patterns = [
-        r'href=["\'](https?://[^"\']*submit[^"\']*)["\']',
-        r'action=["\'](https?://[^"\']*submit[^"\']*)["\']',
-    ]
-    
-    for pattern in html_patterns:
+    # Check HTML attributes
+    for pattern in [r'href=["\']([^"\']*submit[^"\']*)["\']', r'action=["\']([^"\']*submit[^"\']*)["\']']:
         match = re.search(pattern, html, re.IGNORECASE)
         if match:
             url = match.group(1)
-            logger.info(f"Found submit URL in HTML attribute: {url}")
+            if url.startswith('/'):
+                url = base_url + url
+            logger.info(f"Found submit URL in HTML: {url}")
             return url
     
-    # Fallback: Use base_url + "/submit"
-    fallback_url = f"{base_url}/submit"
-    logger.warning(f"No explicit submit URL found, using fallback: {fallback_url}")
-    return fallback_url
+    # Fallback
+    fallback = f"{base_url}/submit"
+    logger.warning(f"Using fallback: {fallback}")
+    return fallback
 
 
-def download_file(url: str, save_path: str = None) -> str:
-    """
-    Download a file from a URL
+def extract_file_urls(html: str, base_url: str) -> dict:
+    """Extract file URLs from page HTML"""
+    files = {
+        "audio": [],
+        "csv": [],
+        "json": [],
+        "pdf": [],
+        "zip": [],
+        "image": []
+    }
     
-    Args:
-        url: URL of the file to download
-        save_path: Optional path to save the file
+    # Find all URLs in HTML
+    url_pattern = r'(?:href|src)=["\']([^"\']+)["\']'
+    matches = re.findall(url_pattern, html, re.IGNORECASE)
     
-    Returns:
-        Path to the downloaded file
-    """
-    import requests
-    import tempfile
-    from pathlib import Path
+    for url in matches:
+        if url.startswith('/'):
+            url = base_url + url
+        elif not url.startswith('http'):
+            continue
+        
+        lower = url.lower()
+        if any(ext in lower for ext in ['.mp3', '.wav', '.opus', '.ogg', '.m4a']):
+            files["audio"].append(url)
+        elif '.csv' in lower:
+            files["csv"].append(url)
+        elif '.json' in lower:
+            files["json"].append(url)
+        elif '.pdf' in lower:
+            files["pdf"].append(url)
+        elif '.zip' in lower:
+            files["zip"].append(url)
+        elif any(ext in lower for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+            files["image"].append(url)
     
-    logger.info(f"Downloading file: {url}")
-    
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    
-    if save_path:
-        path = Path(save_path)
-    else:
-        # Create temp file with appropriate extension
-        ext = Path(urlparse(url).path).suffix or '.tmp'
-        fd, path = tempfile.mkstemp(suffix=ext)
-        path = Path(path)
-    
-    path.write_bytes(response.content)
-    logger.info(f"File downloaded to: {path}")
-    
-    return str(path)
+    logger.info(f"Found files: {files}")
+    return files
