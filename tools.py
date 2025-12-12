@@ -331,23 +331,34 @@ def normalize_csv(url: str) -> List[Dict]:
         result = []
         for _, row in df.iterrows():
             record = {}
-            for col in df.columns:
+            # Process columns in a consistent order
+            for col in sorted(df.columns):
                 val = row[col]
-                if col == 'joined':
+                
+                # Normalize dates (joined column)
+                if col in ['joined', 'date', 'created', 'updated', 'order_date']:
                     try:
                         dt = date_parser.parse(str(val))
                         record[col] = dt.strftime('%Y-%m-%d')
                     except:
                         record[col] = str(val)
-                elif col == 'value':
-                    record[col] = int(float(val)) if pd.notna(val) else 0
-                elif col == 'id':
-                    record[col] = int(val) if pd.notna(val) else 0
+                # Normalize numeric columns as integers
+                elif col in ['value', 'id', 'amount', 'count', 'quantity', 'order_id', 'customer_id']:
+                    if col == 'id' or col == 'order_id':
+                        record[col] = int(float(val)) if pd.notna(val) else 0
+                    elif col == 'value' or col == 'amount':
+                        record[col] = int(float(val)) if pd.notna(val) else 0
+                    else:
+                        record[col] = str(val).strip() if pd.notna(val) else ""
+                # String columns
                 else:
                     record[col] = str(val).strip() if pd.notna(val) else ""
             result.append(record)
         
-        result = sorted(result, key=lambda x: x.get('id', 0))
+        # Sort by id if present
+        if result and 'id' in result[0]:
+            result = sorted(result, key=lambda x: x.get('id', 0))
+        
         logger.info(f"Normalized {len(result)} rows")
         return result
         
