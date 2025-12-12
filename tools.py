@@ -307,12 +307,12 @@ def get_image_dominant_color(url: str) -> str:
 
 
 def transcribe_audio(url: str) -> str:
-    """Transcribe audio file using Gemini 2.5 Flash via AI Pipe proxy"""
+    """Transcribe audio file using Gemini 2.5 Flash via google-genai library"""
     try:
+        from google import genai
         from config import GEMINI_API_KEY
-        import base64
         
-        logger.info(f"Transcribing with Gemini: {url}")
+        logger.info(f"Transcribing with Gemini 2.5 Flash: {url}")
         
         # Download audio
         resp = requests.get(url, timeout=60)
@@ -330,60 +330,29 @@ def transcribe_audio(url: str) -> str:
                 mp3_path = audio_path.replace(ext, '.mp3')
                 audio.export(mp3_path, format='mp3')
                 audio_path = mp3_path
-                ext = '.mp3'
                 logger.info(f"Converted to: {mp3_path}")
             except Exception as e:
                 logger.warning(f"Audio conversion failed: {e}")
         
-        # Read and encode audio as base64
+        # Initialize google-genai client
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        # Upload audio file
         with open(audio_path, 'rb') as f:
-            audio_data = base64.standard_b64encode(f.read()).decode('utf-8')
+            audio_bytes = f.read()
         
-        # Determine MIME type
-        mime_types = {
-            '.mp3': 'audio/mpeg',
-            '.wav': 'audio/wav',
-            '.ogg': 'audio/ogg',
-            '.opus': 'audio/opus',
-            '.m4a': 'audio/mp4',
-        }
-        mime_type = mime_types.get(ext, 'audio/mpeg')
+        # Use gemini-2.5-flash for transcription
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                "Transcribe this audio exactly. Only output the spoken words, nothing else.",
+                {"mime_type": "audio/mpeg", "data": audio_bytes}
+            ]
+        )
         
-        # Use Gemini 2.5 Flash via AI Pipe proxy
-        api_url = "https://aipipe.org/gemini/v1beta/models/gemini-2.5-flash:generateContent"
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {GEMINI_API_KEY}'
-        }
-        
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": "Transcribe this audio exactly. Only output the spoken words, nothing else."},
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": audio_data
-                        }
-                    }
-                ]
-            }]
-        }
-        
-        response = requests.post(api_url, json=payload, headers=headers, timeout=120)
-        
-        logger.info(f"Gemini response: {response.status_code}")
-        
-        if response.status_code == 200:
-            result = response.json()
-            # Extract text from Gemini response
-            text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-            logger.info(f"Transcription: {text}")
-            return text.strip()
-        else:
-            logger.error(f"Transcription error: {response.text}")
-            return f"Error: {response.status_code} - {response.text}"
+        text = response.text
+        logger.info(f"Transcription: {text}")
+        return text.strip()
             
     except Exception as e:
         logger.error(f"Transcription error: {e}")
