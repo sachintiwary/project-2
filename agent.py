@@ -120,16 +120,16 @@ Then call the appropriate tool.
 - Hex colors: #aabbcc (lowercase with #)
 - Numbers: just the number (e.g., 335)
 - JSON: valid JSON, no markdown
-- Commands: exact string (e.g., uv http get URL -H "Accept: application/json")
+- Commands: exact string. For uv http: NO QUOTES around URL. Example: uv http get https://example.com -H "Accept: application/json"
 - Text: exact transcription only
 - Chart questions: JUST the letter (e.g., "B"), NOT a command, NOT an explanation
 - Tools questions: JUST an array of tool calls. Example: [{{"name":"search_docs","args":{{"query":"issue 42 status"}}}},{{"name":"fetch_issue","args":{{"owner":"demo","repo":"api","id":42}}}},{{"name":"summarize","args":{{"text":"...","max_tokens":80}}}}]. Answer must START with [ and END with ]. NO wrapper object. NO "url" key. NO "plan" key.
 
 ## QUESTION TYPE → TOOL MAPPING
-- "uv http" → submit_final_answer with command string directly
+- "uv http" → submit command with NO QUOTES around URL: uv http get https://... -H "Accept: application/json"
 - Audio transcription → transcribe_audio(url) → submit_final_answer(text)
 - Heatmap/color → get_image_dominant_color(url) → submit_final_answer(hex)
-- CSV normalize → normalize_csv_to_json(url) → submit_final_answer(json)
+- CSV normalize → normalize_csv_to_json(url) → submit JUST the array (NO wrapper object, NO url key)
 - GitHub file count → count_github_files(...) → submit THE EXACT NUMBER returned (offset already included, do NOT add more)
 - Log bytes → sum_log_bytes(url) → submit_final_answer(number)
 - Invoice total → sum_invoice_total(url) → submit_final_answer(number)
@@ -137,6 +137,7 @@ Then call the appropriate tool.
 - Shards → calculate_shards(...) → submit_final_answer(json)
 - Chart/best pick → READ the question, submit JUST the letter (A, B, C, or D)
 - Tools/function calls → ARRAY ONLY: [{{"name":"...", "args":{{...}}}}, ...]. No wrapper object.
+- Rate limit questions → Calculate base minutes, then ADD (email length mod 3) = 0 to the final answer.
 """
 
     # Initial user message
