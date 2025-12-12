@@ -116,28 +116,36 @@ Then call the appropriate tool.
 - Do NOT retry failed tools more than twice
 - ALWAYS end with submit_final_answer
 
-## ANSWER FORMAT RULES
-- Hex colors: #aabbcc (lowercase with #)
-- Numbers: just the number (e.g., 335)
-- JSON: valid JSON, no markdown
-- Commands: exact string. For uv http: NO QUOTES around URL. Example: uv http get https://example.com -H "Accept: application/json"
-- Text: exact transcription only
-- Chart questions: JUST the letter (e.g., "B"), NOT a command, NOT an explanation
-- Tools questions: JUST an array of tool calls. Example: [{{"name":"search_docs","args":{{"query":"issue 42 status"}}}},{{"name":"fetch_issue","args":{{"owner":"demo","repo":"api","id":42}}}},{{"name":"summarize","args":{{"text":"...","max_tokens":80}}}}]. Answer must START with [ and END with ]. NO wrapper object. NO "url" key. NO "plan" key.
+## ANSWER FORMAT RULES - READ CAREFULLY!
 
-## QUESTION TYPE → TOOL MAPPING
-- "uv http" → submit command with NO QUOTES around URL: uv http get https://... -H "Accept: application/json"
-- Audio transcription → transcribe_audio(url) → submit_final_answer(text)
-- Heatmap/color → get_image_dominant_color(url) → submit_final_answer(hex)
-- CSV normalize → normalize_csv_to_json(url) → submit JUST the array (NO wrapper object, NO url key)
-- GitHub file count → count_github_files(...) → submit THE EXACT NUMBER returned (offset already included, do NOT add more)
-- Log bytes → sum_log_bytes(url) → submit_final_answer(number)
-- Invoice total → sum_invoice_total(url) → submit_final_answer(number)
-- Embeddings → find_similar_embeddings(url) → submit_final_answer(result)
-- Shards → calculate_shards(...) → submit_final_answer(json)
-- Chart/best pick → READ the question, submit JUST the letter (A, B, C, or D)
-- Tools/function calls → ARRAY ONLY: [{{"name":"...", "args":{{...}}}}, ...]. No wrapper object.
-- Rate limit questions → Calculate base minutes, then ADD (email length mod 3) = 0 to the final answer.
+### FORMAT EXAMPLES (FOLLOW EXACTLY):
+
+1. **Chart/visualization questions** (which chart is best?):
+   - ✅ CORRECT: B
+   - ❌ WRONG: {{"answer": "B"}}
+   - ❌ WRONG: {{"url": "...", "answer": "B"}}
+   - JUST the single letter!
+
+2. **CSV normalization** (normalize this CSV):
+   - ✅ CORRECT: [{{"id": 1, "name": "Alpha", "joined": "2024-01-30", "value": 5}}]
+   - ❌ WRONG: {{"url": "...", "json": [...]}}
+   - ❌ WRONG: {{"data": [...]}}
+   - JUST the array, starting with [ and ending with ]
+
+3. **Tool planning** (design tool calls):
+   - ✅ CORRECT: [{{"name": "search_docs", "args": {{"query": "issue 42"}}}}, {{"name": "fetch_issue", "args": {{"owner": "demo", "repo": "api", "id": 42}}}}]
+   - ❌ WRONG: {{"url": "...", "plan": [...]}}
+   - ❌ WRONG: {{"tools": [...]}}
+   - JUST the array of tool objects!
+
+4. **UV commands**:
+   - ✅ CORRECT: uv http get https://example.com/file.json -H "Accept: application/json"
+   - ❌ WRONG: uv http get "https://example.com/file.json"
+   - NO quotes around URL!
+
+5. **Hex colors**: #aabbcc (lowercase, with #)
+6. **Numbers**: just the number (335, 170.97)
+7. **Transcription**: just the text (hushed parrot 219)
 """
 
     # Initial user message
