@@ -710,4 +710,3 @@ def execute_tool(name: str, arguments: Dict) -> Any:
         return TOOL_FUNCTIONS[name](**arguments)
     except Exception as e:
         return f"Tool error: {e}"
-
