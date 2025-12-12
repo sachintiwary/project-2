@@ -501,7 +501,21 @@ TOOL_FUNCTIONS = {
 def execute_tool(name: str, arguments: Dict) -> Any:
     """Execute a tool by name with arguments"""
     if name == "submit_final_answer":
+        # Handle various ways LLM might pass the answer
         answer = arguments.get("answer", "")
+        
+        # If answer is empty but there are other keys, use the first key or value
+        if not answer and arguments:
+            # LLM sometimes passes {"/path": "/path"} instead of {"answer": "/path"}
+            for key, val in arguments.items():
+                if key != "answer":
+                    # Use the key if it looks like an answer, otherwise use value
+                    answer = key if key and key != val else val
+                    break
+        
+        if not answer:
+            return ""
+        
         # Try to parse as JSON (for arrays/objects)
         try:
             return json.loads(answer)
