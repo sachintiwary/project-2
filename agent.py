@@ -191,8 +191,7 @@ def call_llm_with_tools(messages: list) -> Optional[dict]:
             "model": LLM_MODEL,
             "messages": messages,
             "tools": TOOLS,
-            "tool_choice": "auto",
-            "temperature": 0
+            "tool_choice": "auto"
         }
         
         response = requests.post(
