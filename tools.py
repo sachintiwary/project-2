@@ -331,8 +331,8 @@ def normalize_csv(url: str) -> List[Dict]:
         result = []
         for _, row in df.iterrows():
             record = {}
-            # Process columns in a consistent order
-            for col in sorted(df.columns):
+            # Process columns in ORIGINAL order (not sorted!)
+            for col in df.columns:
                 val = row[col]
                 
                 # Normalize dates (joined column)
