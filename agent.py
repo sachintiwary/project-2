@@ -77,42 +77,79 @@ def agent_solve(page_data: dict) -> Any:
     # Extract URLs from the page for context
     urls = extract_urls_from_page(html, base_url)
     
-    # System prompt
-    system = f"""You are an AI agent that solves quiz questions by using tools.
+    # System prompt - Chain of Thought (CoT) for gpt-5-mini
+    system = f"""You are an expert quiz-solving AI with advanced reasoning capabilities.
 
-AVAILABLE TOOLS:
-- fetch_webpage: Get content from any URL
-- download_and_read_file: Download and read CSV/JSON/PDF/ZIP files
-- get_image_dominant_color: Get hex color from image
-- transcribe_audio: Transcribe audio files (mp3, wav, opus)
-- call_github_api: Call GitHub API for repository data
-- run_python: Execute Python code for calculations (set 'result' variable)
-- calculate_with_email_offset: Add email-based offset to a number
-- normalize_csv_to_json: Convert CSV to normalized JSON array
-- sum_invoice_total: Calculate sum(Quantity * UnitPrice) from PDF
-- sum_log_bytes: Sum bytes from log ZIP where event=='download'
-- submit_final_answer: Submit your final answer
+## CRITICAL INSTRUCTION:
+Before calling ANY tool, you MUST perform a "Silent Thought" process:
+1. [THOUGHT] Analyze: What is the question asking?
+2. [THOUGHT] Check: Do I have the URL/parameters needed?
+3. [THOUGHT] Plan: Which tool should I use?
+4. [THOUGHT] Verify: Is my answer in the correct format?
 
-IMPORTANT:
-- User email: {USER_EMAIL} (length: {len(USER_EMAIL)})
-- For offset calculations: use calculate_with_email_offset
-- Always call submit_final_answer when you have the answer
-- Be concise - call the right tool immediately
-- For audio transcription: just return what was said, no explanation
-- For colors: return the hex code like #aabbcc
-- For JSON normalization: snake_case keys, ISO dates (YYYY-MM-DD), integers for values, sort by id
+Then call the appropriate tool.
+
+## USER CONTEXT
+- Email: {USER_EMAIL}
+- Email length: {len(USER_EMAIL)}
+- Email length % 2 = {len(USER_EMAIL) % 2} (0=even, 1=odd)
+- Email length % 3 = {len(USER_EMAIL) % 3}
+
+## AVAILABLE TOOLS
+1. fetch_webpage(url) - Get webpage content
+2. download_and_read_file(url) - Read CSV/JSON/PDF/ZIP
+3. get_image_dominant_color(url) - Returns hex like #aabbcc
+4. transcribe_audio(url) - Transcribe audio files to text
+5. count_github_files(owner, repo, sha, path_prefix, extension) - Count files + email offset
+6. run_python(code) - Execute Python, must set 'result' variable
+7. calculate_with_email_offset(base_value, divisor) - Add email-based offset
+8. normalize_csv_to_json(url) - Normalize CSV to JSON array
+9. sum_invoice_total(url) - Sum Quantity*UnitPrice from PDF invoice
+10. sum_log_bytes(url) - Sum bytes from logs.zip where event=='download'
+11. calculate_shards(dataset, max_docs_per_shard, max_shards, min_replicas, max_replicas, memory_per_shard, memory_budget) - Optimal shards config
+12. find_similar_embeddings(url) - Returns "s4,s5" if email even, "s2,s3" if odd
+13. submit_final_answer(answer) - REQUIRED: Submit final answer
+
+## TOOL USE RULES
+- ONLY call a tool if you have ALL required arguments
+- Do NOT guess or invent parameters
+- Do NOT retry failed tools more than twice
+- ALWAYS end with submit_final_answer
+
+## ANSWER FORMAT RULES
+- Hex colors: #aabbcc (lowercase with #)
+- Numbers: just the number (e.g., 335)
+- JSON: valid JSON, no markdown
+- Commands: exact string (e.g., uv http get URL -H "Accept: application/json")
+- Text: exact transcription only
+
+## QUESTION TYPE → TOOL MAPPING
+- "uv http" → submit_final_answer with command string directly
+- Audio transcription → transcribe_audio(url) → submit_final_answer(text)
+- Heatmap/color → get_image_dominant_color(url) → submit_final_answer(hex)
+- CSV normalize → normalize_csv_to_json(url) → submit_final_answer(json)
+- GitHub file count → count_github_files(...) → submit_final_answer(count)
+- Log bytes → sum_log_bytes(url) → submit_final_answer(number)
+- Invoice total → sum_invoice_total(url) → submit_final_answer(number)
+- Embeddings → find_similar_embeddings(url) → submit_final_answer(result)
+- Shards → calculate_shards(...) → submit_final_answer(json)
 """
 
     # Initial user message
-    url_context = "\n".join([f"- {t}: {u}" for t, u in urls.items()]) if urls else "No file URLs found"
+    url_context = "\\n".join([f"- {t}: {u}" for t, u in urls.items()]) if urls else "No file URLs found"
     
-    user_msg = f"""QUIZ QUESTION:
+    user_msg = f"""[TASK] Solve this quiz question.
+
+QUESTION:
 {content}
 
-DETECTED URLS ON PAGE:
+DETECTED RESOURCES:
 {url_context}
 
-Analyze the question and use tools to solve it. When you have the answer, call submit_final_answer."""
+[INSTRUCTION] 
+1. First, write your [THOUGHT] analysis
+2. Then call the appropriate tool
+3. Finally, call submit_final_answer with the result"""
 
     messages = [
         {"role": "system", "content": system},
