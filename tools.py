@@ -80,17 +80,18 @@ TOOLS = [
     {
         "type": "function", 
         "function": {
-            "name": "call_github_api",
-            "description": "Call GitHub API with given parameters. Use for GitHub tree/repo operations.",
+            "name": "count_github_files",
+            "description": "Count files in a GitHub repo matching a path prefix and extension. Returns the count. Use for GitHub tree questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "owner": {"type": "string", "description": "Repository owner"},
                     "repo": {"type": "string", "description": "Repository name"},
-                    "sha": {"type": "string", "description": "Commit SHA or branch"},
-                    "endpoint": {"type": "string", "description": "API endpoint like 'git/trees'"}
+                    "sha": {"type": "string", "description": "Commit SHA"},
+                    "path_prefix": {"type": "string", "description": "Path prefix to filter files (e.g., 'project-1/')"},
+                    "extension": {"type": "string", "description": "File extension to count (e.g., '.md')"}
                 },
-                "required": ["owner", "repo", "sha"]
+                "required": ["owner", "repo", "sha", "path_prefix", "extension"]
             }
         }
     },
@@ -272,9 +273,10 @@ def get_image_dominant_color(url: str) -> str:
 
 
 def transcribe_audio(url: str) -> str:
-    """Transcribe audio file using Whisper API"""
+    """Transcribe audio file using OpenAI client with gpt-4o-transcribe"""
     try:
-        from config import AIPIPE_TOKEN
+        from openai import OpenAI
+        from config import AIPIPE_TOKEN, OPENAI_BASE_URL
         
         logger.info(f"Transcribing: {url}")
         
@@ -286,7 +288,7 @@ def transcribe_audio(url: str) -> str:
             f.write(resp.content)
             audio_path = f.name
         
-        # Convert to mp3 if needed
+        # Convert to mp3 if needed (gpt-4o-transcribe may need standard format)
         if ext in ['.opus', '.ogg', '.m4a']:
             try:
                 from pydub import AudioSegment
@@ -294,37 +296,60 @@ def transcribe_audio(url: str) -> str:
                 mp3_path = audio_path.replace(ext, '.mp3')
                 audio.export(mp3_path, format='mp3')
                 audio_path = mp3_path
+                logger.info(f"Converted to: {mp3_path}")
             except Exception as e:
                 logger.warning(f"Audio conversion failed: {e}")
         
-        # Call Whisper API directly
-        api_url = "https://aipipe.org/openai/v1/audio/transcriptions"
+        # Use OpenAI client with AI Pipe
+        client = OpenAI(
+            api_key=AIPIPE_TOKEN,
+            base_url=OPENAI_BASE_URL
+        )
         
-        with open(audio_path, 'rb') as f:
-            files = {'file': (os.path.basename(audio_path), f, 'audio/mpeg')}
-            data = {'model': 'whisper-1'}
-            headers = {'Authorization': f'Bearer {AIPIPE_TOKEN}'}
-            
-            response = requests.post(api_url, files=files, data=data, headers=headers, timeout=60)
+        with open(audio_path, 'rb') as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="gpt-4o-transcribe",
+                file=audio_file
+            )
         
-        if response.status_code == 200:
-            result = response.json()
-            return result.get('text', '')
-        else:
-            return f"Transcription error: {response.status_code} - {response.text}"
+        logger.info(f"Transcription: {transcript.text}")
+        return transcript.text
             
     except Exception as e:
+        logger.error(f"Transcription error: {e}")
         return f"Error: {e}"
 
 
-def call_github_api(owner: str, repo: str, sha: str, endpoint: str = "git/trees") -> str:
-    """Call GitHub API"""
+def count_github_files(owner: str, repo: str, sha: str, path_prefix: str, extension: str) -> int:
+    """Count files in GitHub repo matching path prefix and extension, add email offset"""
+    from config import USER_EMAIL
+    
     try:
-        url = f"https://api.github.com/repos/{owner}/{repo}/{endpoint}/{sha}?recursive=1"
+        url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{sha}?recursive=1"
         logger.info(f"GitHub API: {url}")
         
         resp = requests.get(url, headers={'Accept': 'application/vnd.github.v3+json'}, timeout=30)
-        return json.dumps(resp.json(), indent=2)
+        
+        if resp.status_code != 200:
+            return f"Error: {resp.status_code} - {resp.text}"
+        
+        tree = resp.json().get('tree', [])
+        
+        # Count files matching criteria
+        count = 0
+        for item in tree:
+            path = item.get('path', '')
+            if path.startswith(path_prefix) and path.endswith(extension):
+                count += 1
+                logger.info(f"Found: {path}")
+        
+        # Add email offset (mod 2 for .md files)
+        offset = len(USER_EMAIL) % 2
+        result = count + offset
+        
+        logger.info(f"Count: {count}, Email offset (mod 2): {offset}, Final: {result}")
+        return result
+        
     except Exception as e:
         return f"Error: {e}"
 
@@ -489,7 +514,7 @@ TOOL_FUNCTIONS = {
     "download_and_read_file": download_and_read_file,
     "get_image_dominant_color": get_image_dominant_color,
     "transcribe_audio": transcribe_audio,
-    "call_github_api": call_github_api,
+    "count_github_files": count_github_files,
     "run_python": run_python,
     "calculate_with_email_offset": calculate_with_email_offset,
     "normalize_csv_to_json": normalize_csv_to_json,
