@@ -232,15 +232,32 @@ def transcribe_audio(url: str) -> str:
             f.write(resp.content)
             audio_path = f.name
         
-        # Convert to MP3 if needed
-        mime_type = "audio/mpeg"
-        if ext in ['.opus', '.ogg', '.wav', '.flac']:
-            from pydub import AudioSegment
-            audio = AudioSegment.from_file(audio_path)
-            mp3_path = audio_path.replace(ext, '.mp3')
-            audio.export(mp3_path, format='mp3')
-            audio_path = mp3_path
-            logger.info(f"Converted to: {audio_path}")
+        # Gemini supported MIME types: audio/wav, audio/mp3, audio/aiff, audio/aac, audio/ogg, audio/flac
+        mime_map = {
+            '.mp3': 'audio/mp3',
+            '.wav': 'audio/wav',
+            '.ogg': 'audio/ogg',
+            '.opus': 'audio/ogg',  # Opus in Ogg container
+            '.flac': 'audio/flac',
+            '.aac': 'audio/aac',
+            '.aiff': 'audio/aiff',
+            '.m4a': 'audio/aac'
+        }
+        
+        mime_type = mime_map.get(ext, 'audio/mp3')
+        
+        # Convert opus to mp3 if not directly supported
+        if ext == '.opus':
+            try:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(audio_path)
+                mp3_path = audio_path.replace(ext, '.mp3')
+                audio.export(mp3_path, format='mp3')
+                audio_path = mp3_path
+                mime_type = 'audio/mp3'
+                logger.info(f"Converted to: {audio_path}")
+            except Exception as conv_err:
+                logger.warning(f"Conversion failed: {conv_err}, trying original")
         
         # Read audio bytes
         with open(audio_path, 'rb') as f:
@@ -251,7 +268,7 @@ def transcribe_audio(url: str) -> str:
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
-                "Transcribe exactly what is spoken. Output ONLY the words, nothing else.",
+                "Generate a transcript of the speech. Output ONLY the exact words spoken, nothing else.",
                 types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
             ]
         )

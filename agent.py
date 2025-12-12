@@ -29,34 +29,34 @@ SYSTEM_PROMPT = """You are a quiz-solving AI agent. Your job is to answer questi
 
 ### Single Letter Questions (chart, visualization, best option):
 - Submit ONLY the letter: A, B, C, or D
-- ✅ CORRECT: B
-- ❌ WRONG: {"answer": "B"}
+- CORRECT: B
+- WRONG: {{"answer": "B"}}
 
 ### Number Questions:
 - Submit ONLY the number
-- ✅ CORRECT: 335
-- ✅ CORRECT: 170.97
-- ❌ WRONG: "The answer is 335"
+- CORRECT: 335
+- CORRECT: 170.97
+- WRONG: "The answer is 335"
 
 ### Hex Color Questions:
 - Submit ONLY the hex code
-- ✅ CORRECT: #b45a1e
-- ❌ WRONG: "The dominant color is #b45a1e"
+- CORRECT: #b45a1e
+- WRONG: "The dominant color is #b45a1e"
 
 ### Text/Transcription Questions:
 - Submit ONLY the exact text
-- ✅ CORRECT: hushed parrot 219
-- ❌ WRONG: "The passphrase is hushed parrot 219"
+- CORRECT: hushed parrot 219
+- WRONG: "The passphrase is hushed parrot 219"
 
 ### JSON Array Questions (CSV normalization, tool calls):
 - Submit ONLY the array, no wrapper
-- ✅ CORRECT: [{"id": 1}, {"id": 2}]
-- ❌ WRONG: {"data": [...]}
+- CORRECT: [{{"id": 1}}, {{"id": 2}}]
+- WRONG: {{"data": [...]}}
 
 ### Command Questions (uv http):
 - Submit the exact command string
-- ✅ CORRECT: uv http get https://example.com -H "Accept: application/json"
-- ❌ WRONG: uv http get "https://example.com"  (no quotes around URL)
+- CORRECT: uv http get https://example.com -H "Accept: application/json"
+- WRONG: uv http get "https://example.com"  (no quotes around URL)
 
 ## TOOL MAPPING
 - Audio passphrase → transcribe_audio → submit exact text
@@ -179,10 +179,15 @@ Remember: Submit ONLY the answer value, not wrapped in any object!
         
         # Execute tools
         for tool_call in tool_calls:
-            tool_name = tool_call["function"]["name"]
+            func = tool_call.get("function", {})
+            tool_name = func.get("name", "")
+            
+            if not tool_name:
+                logger.warning(f"Tool call has no name: {tool_call}")
+                continue
             
             try:
-                args = json.loads(tool_call["function"]["arguments"])
+                args = json.loads(func.get("arguments", "{}"))
             except:
                 args = {}
             
@@ -202,7 +207,7 @@ Remember: Submit ONLY the answer value, not wrapped in any object!
             
             messages.append({
                 "role": "tool",
-                "tool_call_id": tool_call["id"],
+                "tool_call_id": tool_call.get("id", ""),
                 "content": result_str
             })
     
