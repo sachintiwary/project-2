@@ -152,6 +152,23 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "calculate_rate_minutes",
+            "description": "Calculate minimal minutes to fetch all pages given rate limits. Use for rate limiting questions. OUTPUT: Integer minutes with email offset already added.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pages": {"type": "integer", "description": "Total number of pages to fetch"},
+                    "per_minute": {"type": "integer", "description": "Max requests per minute"},
+                    "per_hour": {"type": "integer", "description": "Max requests per hour"},
+                    "retry_every": {"type": "integer", "description": "Seconds to wait when hitting hourly limit"}
+                },
+                "required": ["pages", "per_minute", "per_hour", "retry_every"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit_answer",
             "description": "Submit final answer to the quiz. Use this ONLY when you have the complete answer.",
             "parameters": {
@@ -338,7 +355,8 @@ def normalize_csv(url: str) -> List[Dict]:
                 # Normalize dates (joined column)
                 if col in ['joined', 'date', 'created', 'updated', 'order_date']:
                     try:
-                        dt = date_parser.parse(str(val))
+                        # Use dayfirst=True for European date format (DD/MM/YY)
+                        dt = date_parser.parse(str(val), dayfirst=True)
                         record[col] = dt.strftime('%Y-%m-%d')
                     except:
                         record[col] = str(val)
@@ -543,8 +561,42 @@ def submit_answer(answer: str) -> Any:
 
 
 # ============================================================
-# TOOL EXECUTOR
-# ============================================================
+
+def calculate_rate_minutes(pages: int, per_minute: int, per_hour: int, retry_every: int) -> int:
+    """Calculate minimal minutes to fetch all pages with rate limits"""
+    from config import EMAIL_LENGTH
+    import math
+    
+    logger.info(f"Calculating rate minutes: {pages} pages, {per_minute}/min, {per_hour}/hr, retry={retry_every}s")
+    
+    remaining = pages
+    total_seconds = 0
+    hour_count = 0
+    
+    while remaining > 0:
+        # Each minute, we can do up to per_minute requests
+        this_min = min(remaining, per_minute)
+        
+        # But also check hourly limit
+        if hour_count + this_min > per_hour:
+            this_min = per_hour - hour_count
+        
+        remaining -= this_min
+        hour_count += this_min
+        total_seconds += 60  # 1 minute passed
+        
+        # Hit hourly limit? Wait retry_every seconds
+        if hour_count >= per_hour and remaining > 0:
+            total_seconds += retry_every
+            hour_count = 0  # Reset hourly counter
+    
+    base_minutes = math.ceil(total_seconds / 60)
+    offset = EMAIL_LENGTH % 3
+    final = base_minutes + offset
+    
+    logger.info(f"Base: {base_minutes} min, Offset: {offset}, Final: {final}")
+    return final
+
 
 TOOL_FUNCTIONS = {
     "fetch_url": fetch_url,
@@ -556,6 +608,7 @@ TOOL_FUNCTIONS = {
     "sum_invoice": sum_invoice,
     "sum_log_bytes": sum_log_bytes,
     "run_python": run_python,
+    "calculate_rate_minutes": calculate_rate_minutes,
     "submit_answer": submit_answer
 }
 
