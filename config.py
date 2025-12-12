@@ -1,6 +1,6 @@
 """
 Configuration for LLM Quiz Solver Agent
-Using gpt-5-mini for reasoning + Gemini 2.5 Flash for audio
+Using DeepSeek-V3 via GitHub Models + Gemini 2.5 Flash for audio
 """
 import os
 
@@ -8,16 +8,17 @@ import os
 MY_SECRET = os.getenv("MY_SECRET", "TDS2025_Q7x9Kp2mNvL8wR4jF6hB3yZ")
 AIPIPE_TOKEN = os.getenv("AIPIPE_TOKEN", "")
 
+# GitHub Models API (for DeepSeek-V3)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
 # Gemini API for audio transcription
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-# AI Pipe API settings
-OPENAI_BASE_URL = "https://aipipe.org/openai/v1"
+# GitHub Models API settings (OpenAI-compatible)
+OPENAI_BASE_URL = "https://models.github.ai/inference"
 
-# Model - using gpt-5-mini for advanced reasoning
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5-mini")
-
-# Browser settings
+# Model - using DeepSeek-V3 for advanced reasoning
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek/DeepSeek-V3-0324")
 BROWSER_TIMEOUT = 30000  # 30 seconds
 
 # Agent settings
