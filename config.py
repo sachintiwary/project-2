@@ -14,8 +14,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # AI Pipe API settings
 OPENAI_BASE_URL = "https://aipipe.org/openai/v1"
 
-# Model - using o3-mini for advanced reasoning
-LLM_MODEL = os.getenv("LLM_MODEL", "o3-mini")
+# Model - using gpt-5-mini for advanced reasoning
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5-mini")
 
 # Browser settings
 BROWSER_TIMEOUT = 30000  # 30 seconds
