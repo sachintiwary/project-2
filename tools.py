@@ -53,7 +53,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_image_dominant_color",
-            "description": "Download an image and get its dominant/most common color as a hex code like #aabbcc",
+            "description": "Download an image and return its dominant/most common color. OUTPUT FORMAT: Hex code like #b45a1e (lowercase with #). Submit this exact value.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -67,7 +67,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "transcribe_audio",
-            "description": "Download and transcribe an audio file to text. Returns the spoken words.",
+            "description": "Transcribe an audio file to text. OUTPUT FORMAT: The spoken words exactly (e.g., 'hushed parrot 219'). Submit this text as-is.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -81,7 +81,7 @@ TOOLS = [
         "type": "function", 
         "function": {
             "name": "count_github_files",
-            "description": "Count files in a GitHub repo matching a path prefix and extension. Returns the count. Use for GitHub tree questions.",
+            "description": "Count files in a GitHub repo. OUTPUT FORMAT: A single integer (the final count with offset already included). Submit this number directly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -129,7 +129,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "normalize_csv_to_json",
-            "description": "Normalize CSV data: convert keys to snake_case, dates to ISO-8601 (YYYY-MM-DD), values to integers, sort by id ascending. Returns JSON array.",
+            "description": "Normalize messy CSV: snake_case keys, ISO dates (YYYY-MM-DD), integer values, sorted by id. OUTPUT FORMAT: JSON array like [{id:1,...}]. Submit this array directly - NO wrapper object!",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -710,3 +710,4 @@ def execute_tool(name: str, arguments: Dict) -> Any:
         return TOOL_FUNCTIONS[name](**arguments)
     except Exception as e:
         return f"Tool error: {e}"
+
