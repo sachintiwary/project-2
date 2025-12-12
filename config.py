@@ -11,8 +11,8 @@ AIPIPE_TOKEN = os.getenv("AIPIPE_TOKEN", "")
 # AI Pipe API settings
 OPENAI_BASE_URL = "https://aipipe.org/openai/v1"
 
-# Model - using gpt-4o-mini for cost efficiency (great at tool calling!)
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+# Model - using gpt-4o for best function calling
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
 # Browser settings
 BROWSER_TIMEOUT = 30000  # 30 seconds
