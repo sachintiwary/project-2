@@ -9,6 +9,7 @@ import os
 MY_SECRET = os.getenv("MY_SECRET", "")
 AIPIPE_TOKEN = os.getenv("AIPIPE_TOKEN", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 # ============================================================
 # API SETTINGS
