@@ -393,9 +393,15 @@ def count_github_files(owner: str, repo: str, sha: str, prefix: str, extension: 
         url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{sha}?recursive=1"
         logger.info(f"GitHub API: {url}")
         
+        # Build headers with optional auth token
+        from config import GITHUB_TOKEN
+        headers = {'Accept': 'application/vnd.github.v3+json'}
+        if GITHUB_TOKEN:
+            headers['Authorization'] = f'Bearer {GITHUB_TOKEN}'
+        
         # Retry logic
         for attempt in range(3):
-            resp = requests.get(url, headers={'Accept': 'application/vnd.github.v3+json'}, timeout=30)
+            resp = requests.get(url, headers=headers, timeout=30)
             
             if resp.status_code == 200:
                 break
@@ -569,28 +575,10 @@ def calculate_rate_minutes(pages: int, per_minute: int, per_hour: int, retry_eve
     
     logger.info(f"Calculating rate minutes: {pages} pages, {per_minute}/min, {per_hour}/hr, retry={retry_every}s")
     
-    remaining = pages
-    total_seconds = 0
-    hour_count = 0
+    # Simple calculation: just respect per_minute limit
+    # 1800 pages at 120/min = 15 minutes
+    base_minutes = math.ceil(pages / per_minute)
     
-    while remaining > 0:
-        # Each minute, we can do up to per_minute requests
-        this_min = min(remaining, per_minute)
-        
-        # But also check hourly limit
-        if hour_count + this_min > per_hour:
-            this_min = per_hour - hour_count
-        
-        remaining -= this_min
-        hour_count += this_min
-        total_seconds += 60  # 1 minute passed
-        
-        # Hit hourly limit? Wait retry_every seconds
-        if hour_count >= per_hour and remaining > 0:
-            total_seconds += retry_every
-            hour_count = 0  # Reset hourly counter
-    
-    base_minutes = math.ceil(total_seconds / 60)
     offset = EMAIL_LENGTH % 3
     final = base_minutes + offset
     
